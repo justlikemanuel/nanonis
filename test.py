@@ -15,3 +15,5 @@ v = bias.Get()                                      # Get the current bias
 print("Bias: " + str(v) + " V")                     # Confirm bias has been set
 
 NTCP.close_connection()                             # Close the connection.
+
+# test
