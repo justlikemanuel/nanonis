@@ -1,6 +1,6 @@
-from pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
-from pyNanonisMeasurements.nanonisTCP import NanonisModules
-
+from libs.pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
+from libs.pyNanonisMeasurements.nanonisTCP import NanonisModules
+#from transfer_finder import transfer_finder
 import time
 
 TCP_IP  = '127.0.0.1'                               # Local host
@@ -10,6 +10,16 @@ version = 14000                                     # Nanonis RT Engine version 
 NTCP = nanonisTCP(TCP_IP, TCP_PORT, version=version)  # This is how you establish a TCP connection. NTCP is the connection handle.
                                                     # Check your nanonis version in Nanonis > help > info and enter the RT Engine number
 NMod = NanonisModules.NanonisModules(NTCP)          # Load all nanonis modules
+
+# get current xy position
+x,y = NMod.FolMe.XYPosGet(Wait_for_newest_data=True)
+print("current xy position: ", x, y)
+
+# move to xy position
+wait_end_move = False
+NMod.FolMe.XYPosSet(8e-9, -5e-9, wait_end_move)
+
+
 
 # check if controller is on
 state = NMod.ZCtl.OnOffGet()
@@ -33,6 +43,8 @@ NMod.ZCtl.OnOffSet(0)
 # check if controller is off now
 state = NMod.ZCtl.OnOffGet()
 print("current state: ", state)
+
+print("Z position: ", NMod.ZCtl.ZPosGet())
 
 NTCP.close_connection()                             # Close the connection.
 
