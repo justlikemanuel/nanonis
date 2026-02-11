@@ -1,1 +1,1 @@
-@Manuel: achte darauf, ob die locale lib (von Nicolaj) nanonisTCP verwendet werden soll, oder die "public" lib
+For testing only.
