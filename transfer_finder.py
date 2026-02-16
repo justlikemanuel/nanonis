@@ -106,25 +106,30 @@ class transfer_finder:
         wait_end_move = False
         self.nanonis_module.FolMe.XYPosSet(self.save_x_position, self.save_y_position, wait_end_move)
 
-        # set the bias mode to the desired value
-        self.nanonis_module.Bias.Set(self.safe_voltage)
-            
+        # TODO: what is better, set off-delay to 0 and then deactivate, or deactivate immediately and wait for some time? 
+
+        # set off delay to 0
+        self.nanonis_module.ZCtl.OffDelaySet(0)
+
         # deactivate controller
         if self.nanonis_module.ZCtl.OnOffGet()==1:
             self.nanonis_module.ZCtl.OnOffSet(0)
 
-        # not in if-block, as in the worst case, the controller has been switched off just before the error occurred
-        time.sleep(self.height_averaging_period_s + self.buffer_time_s)
+        
+        # TODO: find best waiting time
+        time.sleep(self.buffer_time_s)
 
+        
+        # set the bias mode to the desired value
+        self.nanonis_module.Bias.Set(self.safe_voltage)
+        
         # set the desired current
         self.nanonis_module.ZCtl.SetpntSet(self.save_current_A)
-        #time.sleep(199)
-        time.sleep(5)
-
-        # activate controller
-        if self.nanonis_module.ZCtl.OnOffGet()==0:
-            self.nanonis_module.ZCtl.OnOffSet(1)
-
+        
+        # TODO: find proper waiting time before and after switching the controller on
+        # activate z-controller
+        self.nanonis_module.ZCtl.OnOffSet(1)             
+ 
     # if an error occurs, execute this command
     def escape_routine(self):
         """
@@ -138,7 +143,23 @@ class transfer_finder:
 
         self.return_to_default_state()
 
-    
+    # function to go to measurement position and height
+    def prepare_measurement(self):
+        """
+        Function to prepare the measurement position by moving to the specified xy position and setting the z-controller to the specified current setpoint.     
+        """
+
+        # move to default setpoint
+        self.return_to_default_state()
+
+               
+        # ensure the z_off_delay is set to the desired value
+        self.nanonis_module.ZCtl.OffDelaySet(self.height_averaging_period_s)
+
+        # turn off the z-controller to allow for height averaging
+        self.nanonis_module.ZCtl.OnOffSet(0)
+
+
     # function to track the atom
     def track_atom(self, tracking_time_s=None, new_I_gain=None, new_Frequency=None, new_Amplitude=None, new_Phase=None, new_SwitchOffDelay=None):
         """
@@ -369,6 +390,8 @@ class transfer_finder:
                 print(f"Executing atom tracking after {index+1} measurement steps.")
                 self.track_atom()
 
+        # return to default state after the measurement is done
+        self.return_to_default_state()
         # TODO: implement logging
         # return 0
 
