@@ -1,15 +1,15 @@
 # module to run a measurement that allows computing the transfer function for some frequencies
-from libs.pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
-from libs.pyNanonisMeasurements.nanonisTCP import NanonisModules
-from libs.AWG_M8195A_interface.M8195A import M8195A
+from nlibs.pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
+from nlibs.pyNanonisMeasurements.nanonisTCP import NanonisModules
+#from nlibs.AWG_M8195A_interface.M8195A import M8195A
 import time
 import numpy as np 
 import json
 
-class transfer_finder:
-    def __init__(self, nanonis_module, safe_voltage_V, save_current_A,
-                save_x_position, save_y_position, 
-                i_rec_integration_time,
+class transferFinder:
+    def __init__(self, nanonis_module, safe_voltage_V, safe_current_A,
+                safe_x_position_m, safe_y_position_m, 
+                i_rec_integration_time_s,
                 max_allowed_amplitude_uV,
                 amplitude_guess_mode,
                 old_transfer_function,
@@ -17,7 +17,8 @@ class transfer_finder:
                 atom_tracking_time_s, atom_tracking_interval,
                 z_off_delay_s, awg_reference,
                 sweep_frequencies, default_frequency,
-                reference_amplitudes_uV,
+                reference_amplitudes_uV, default_amplitude_uV,
+                threshold_voltage_V,
                 version, filename, header,
                  ):
         
@@ -27,10 +28,10 @@ class transfer_finder:
         Args:
             - nanonis_module: The NanonisModules object to interact with the Nanonis system.
             - safe_voltage_V: The voltage to set in case of an error to protect the sample and tip.
-            - save_current_A: The current to set in case of an error to protect the sample and tip.
-            - save_x_position: The x position to set in case of an error to protect the sample and tip.
-            - save_y_position: The y position to set in case of an error to protect the sample and tip.
-            - i_rec_integration_time: The integration time to use when recording the Irec value.
+            - safe_current_A: The current to set in case of an error to protect the sample and tip.
+            - safe_x_position_m: The x position to set in case of an error to protect the sample and tip.
+            - safe_y_position_m: The y position to set in case of an error to protect the sample and tip.
+            - i_rec_integration_time_s: The integration time to use when recording the Irec value, in seconds.
             - max_allowed_amplitude_uV: The maximum amplitude to apply with the AWG during the tuning process, in microvolts.
             - amplitude_guess_mode: The strategy to use for estimating the starting amplitude for the tuning process. Options are "known" and "half". "known" uses the recorded Irec values for the reference amplitudes to find the two reference frequencies that are closest to the desired frequency, and performs a linear interpolation to estimate the Irec value at the desired frequency, then finds the corresponding amplitude. "half" assumes 0.5 transmission to estimate the starting amplitude.
             - old_transfer_function: The old transfer function to use for estimating the starting amplitude for the tuning process. 
@@ -44,6 +45,7 @@ class transfer_finder:
             - sweep_frequencies: The frequencies for which to measure the transfer function.
             - default_frequency: The default frequency to use for measuring the reference Irec value.
             - reference_amplitudes_uV: The reference amplitudes to use for recording the Irec values, in microvolts.
+            - threshold_voltage_V: The voltage threshold to use for the escape routine. If the recorded voltage exceeds this threshold, the escape routine will be executed to protect the sample and tip.
             - version: The version of the experiment, to be saved in the data file.
             - filename: The name of the file to save the data to.
             - header: The header to save in the data file, e.g. a description of the experiment and the settings used.
@@ -52,20 +54,21 @@ class transfer_finder:
         
         self.nanonis_module = nanonis_module
         self.safe_voltage = safe_voltage_V
-        self.save_current_A = save_current_A
+        self.safe_current_A = safe_current_A
         self.buffer_time_s = 1e-3
         self.awg = awg_reference
-        self.i_rec_integration_time = i_rec_integration_time
+        self.i_rec_integration_time_s = i_rec_integration_time_s
 
         # save recovery parameters
-        self.save_x_position = save_x_position
-        self.save_y_position = save_y_position
+        self.safe_x_position_m = safe_x_position_m
+        self.safe_y_position_m = safe_y_position_m
         
-        # Recording parameters:
+        # Sweep parameters:
         self.sweep_frequencies = sweep_frequencies
         self.default_frequency = default_frequency
-        self.default_amplitude_uV = reference_amplitudes_uV[-1]
+        self.default_amplitude_uV = default_amplitude_uV
         self.reference_amplitudes_uV = reference_amplitudes_uV
+        self.threshold_voltage_V = threshold_voltage_V
         self.max_allowed_amplitude_uV = max_allowed_amplitude_uV
 
         self.atom_tracking_parameters = atom_tracking_parameters
@@ -91,7 +94,7 @@ class transfer_finder:
         self.default_transfer_function = None # transfer function at the default frequency and default amplitude
         self.max_amplitude_uV = None # voltage to achieve 1.5*Irec. this will be set during the recording routine, as it depends on the recorded Irec values
 
-        self.recorded_data_headers = ["frequency_Hz", "transfer_function"] # TODO: add all parameters
+        self.recorded_data_headers = ["frequency in Hz", "transfer_function", "tuned_amplitude in uV"] # TODO: add all parameters
         self.recorded_data_values = [] # list of tuples (frequency_Hz, transfer_function)
 
     ###################################################
@@ -104,12 +107,12 @@ class transfer_finder:
         # TODO: check with Nicolaj for best sequence of operations
         # move to xy position
         wait_end_move = False
-        self.nanonis_module.FolMe.XYPosSet(self.save_x_position, self.save_y_position, wait_end_move)
+        self.nanonis_module.FolMe.XYPosSet(self.safe_x_position_m, self.safe_y_position_m, wait_end_move)
 
         # TODO: what is better, set off-delay to 0 and then deactivate, or deactivate immediately and wait for some time? 
 
         # set off delay to 0
-        self.nanonis_module.ZCtl.OffDelaySet(0)
+        self.nanonis_module.ZCtl.SwitchOffDelaySet(0)
 
         # deactivate controller
         if self.nanonis_module.ZCtl.OnOffGet()==1:
@@ -124,7 +127,7 @@ class transfer_finder:
         self.nanonis_module.Bias.Set(self.safe_voltage)
         
         # set the desired current
-        self.nanonis_module.ZCtl.SetpntSet(self.save_current_A)
+        self.nanonis_module.ZCtl.SetpntSet(self.safe_current_A)
         
         # TODO: find proper waiting time before and after switching the controller on
         # activate z-controller
@@ -152,9 +155,12 @@ class transfer_finder:
         # move to default setpoint
         self.return_to_default_state()
 
-               
+        # run atom tracking
+        print("Starting atom tracking.")
+        self.track_atom(tracking_time_s=self.atom_tracking_period_s)
+
         # ensure the z_off_delay is set to the desired value
-        self.nanonis_module.ZCtl.OffDelaySet(self.height_averaging_period_s)
+        self.nanonis_module.ZCtl.SwitchOffDelaySet(self.height_averaging_period_s)
 
         # turn off the z-controller to allow for height averaging
         self.nanonis_module.ZCtl.OnOffSet(0)
@@ -208,25 +214,84 @@ class transfer_finder:
         """
         # TODO: Check if cur.get or signal.valget get is better
 
+        ####### signal.valget method:
+        current_values_A = []
+        start_time = time.perf_counter()
+        while time.perf_counter() - start_time < self.i_rec_integration_time_s:
+            i_tun = self.nanonis_module.Sig.ValGet(0, True) # channel 0 is current, we wait for next update
+            current_values_A.append(i_tun)
 
+        # compute the average current value over the integration time
+        irec = np.mean(current_values_A)
+
+        ######## cur.get method:
         # set the integration time
         # get the Irec value
-        irec = self.nanonis_module.Cur.Get()
+        #irec = self.nanonis_module.Cur.Get()
 
         return irec
 
-                
+    # function to find a threshold value in a curve
+    def find_threshold(self, x, y):
+        """
+        Function to compute the value x at the threshold in y(x)
+        Params: 
+            - x: list of x values
+            - y: list of y values
+        """
+        # find x where y has the highest change
+        dy = np.diff(y)
+        dx = np.diff(x)
+        derivative = dy/dx
+        max_derivative_index = np.argmax(derivative)
+        threshold_x = x[max_derivative_index]
+
+        return threshold_x
+    
+    # function to measure the reference Irec value
+    def find_reference_parameters(self):
+        """
+        Function to measure the reference Irec value at the default frequency and default amplitude. This value will be used as a reference for tuning the AWG amplitude for the other frequencies.
+        """
+
+        # configure AWG to output the reference signal
+        self.awg.configure_continuous_sine_wave(channel_number=1, frequency_Hz=self.default_frequency, 
+                                                num_periods=1, starting_amplitude_uV=self.default_amplitude_uV, approximate_frequency=False)
+
+        # turn on the AWG output
+        self.awg.start_playing()
+        # wait for the system to stabilize
+        time.sleep(0.1)
+        
+        # record the Irec value for the default frequency and default amplitude
+        self.default_i_rec = self.get_irec()
+
+        # turn off the AWG output
+        self.awg.stop_playing()
+        print("Found Irec. AWG OFF.")
+
+        # TODO: find how from this, we can compute the transfer function at the default frequency and default amplitude, which will be used as a reference for estimating the starting amplitude for the tuning process for the other frequencies.
+        # compute the transfer function at the default frequency and default amplitude, which will be used as a reference for estimating the starting amplitude for the tuning process for the other frequencies.
+        observed_threshold_voltage_uV = self.find_threshold(x=self.reference_amplitudes_uV, y=[irec for (amplitude_uV, irec) in self.irec_vs_reference_amplitudes])
+        self.default_transfer_function = self.threshold_voltage_V / observed_threshold_voltage_uV * 1e-6
+        print(f"Measured reference Irec: {self.default_i_rec} A at default frequency {self.default_frequency} Hz and default amplitude {self.default_amplitude_uV} uV. Computed transfer function at default frequency: {self.default_transfer_function}")
+
+
     # record Irec vs the reference amplitudes
     def record_irec_for_references(self):
 
         # configure AWG to output the reference signal
         # channel_number, frequency_Hz, num_periods = 1, starting_amplitude_uV = 75_000, approximate_frequency = False):
-        self.awg.configure_continuous_sine_wave(channel_number=1, frequency=self.default_frequency, 
+        self.awg.configure_continuous_sine_wave(channel_number=1, frequency_Hz=self.default_frequency, 
                                                 num_periods=1, starting_amplitude_uV=self.reference_amplitudes_uV[0], approximate_frequency=False)
         
+        # activate the output of the AWG
+        self.awg.start_playing()
+        print("AWG ON")
+
         for index, amplitude_uV in enumerate(self.reference_amplitudes_uV):
             self.awg.update_continuous_sine_wave_amplitude(new_amplitude_uV=amplitude_uV)
-            time.sleep(self.i_rec_integration_time)
+            time.sleep(self.i_rec_integration_time_s)
             irec = self.get_irec()
 
             # add to list
@@ -247,6 +312,8 @@ class transfer_finder:
         iteration = 0
         max_current = self.default_i_rec
 
+        
+        # record Irec values while increasing the amplitude until we reach 1.5 times the default Irec, which will be used as a reference for the maximum amplitude to apply during the tuning process for the other frequencies, to protect the sample and tip from excessive current.
         while max_current < 1.5 * self.default_i_rec and iteration < max_iterations:
             max_amplitude_uV += amplitude_spacing_uV
             # check if the amplitude exceeds the maximum allowed amplitude to protect the sample and tip
@@ -256,14 +323,17 @@ class transfer_finder:
                 # TODO: Log the achieved Irec value at the maximum allowed amplitude
                 break
             self.awg.update_continuous_sine_wave_amplitude(new_amplitude_uV=max_amplitude_uV)
-            time.sleep(self.i_rec_integration_time)
+            time.sleep(self.i_rec_integration_time_s)
             max_current = self.get_irec()
             iteration += 1
 
         self.max_amplitude_uV = max_amplitude_uV
         print(f"Max amplitude found: {max_amplitude_uV} uV, recorded Irec: {self.get_irec()} A")
 
-
+        # stop the AWG output
+        self.awg.stop_playing()
+        print("AWG OFF")
+   
     # function to tune awg amplitude for a specific frequency to match reference irec
     def tune_awg_amplitude_for_frequency(self, frequency_Hz, starting_amplitude_uV = 100_000,
                                          tolerance=0.01, max_iterations=100):
@@ -279,10 +349,18 @@ class transfer_finder:
         Returns
         tuned_amplitude_uV (float): The tuned amplitude in microvolts that achieves the desired Irec within the specified tolerance.
         """
-        # TODO: Find proper startig and reference amplitude for the tuning process.
+
+        # TODO: Find proper starting and reference amplitude for the tuning process.
         # configure AWG to output the reference signal
-        self.awg.configure_continuous_sine_wave(channel_number=1, frequency=frequency_Hz, 
+        # verify that the starting amplitude is integer
+        starting_amplitude_uV = int(starting_amplitude_uV)
+        self.awg.configure_continuous_sine_wave(channel_number=1, frequency_Hz=frequency_Hz, 
                                                 num_periods=1, starting_amplitude_uV=starting_amplitude_uV, approximate_frequency=False)
+
+        # turn on the AWG output
+        self.awg.start_playing()
+        print(f"AWG ON for frequency {frequency_Hz} Hz, starting amplitude {starting_amplitude_uV} uV")
+        time.sleep(0.1) # wait for the system to stabilize
 
         tuned_amplitude_uV = starting_amplitude_uV
         iteration = 0
@@ -303,9 +381,14 @@ class transfer_finder:
             time.sleep(self.i_rec_integration_time)
             iteration += 1
 
+        # turn off the AWG output
+        self.awg.stop_playing()
+
         # log the result
         print(f"Tuned amplitude for frequency {frequency_Hz} Hz: {tuned_amplitude_uV} uV, recorded Irec: {self.get_irec()} A, iterations: {iteration}")
+        
         return tuned_amplitude_uV
+
     
     # function to estimate the starting amplitude for the tuning process
     def estimate_starting_amplitude_for_frequency(self, frequency_Hz, mode):
@@ -343,6 +426,8 @@ class transfer_finder:
 
             print(f"Estimated starting amplitude for frequency {frequency_Hz} Hz: {starting_amplitude_uV} uV using mode {mode}")
 
+        if mode == "fixed":
+            starting_amplitude_uV = 200_000
         return starting_amplitude_uV
     
         
@@ -359,6 +444,7 @@ class transfer_finder:
         """
         amplitude_guess_mode = self.amplitude_guess_mode
         starting_amplitude_uV = self.estimate_starting_amplitude_for_frequency(frequency_Hz, mode=amplitude_guess_mode)
+        print(f"Estimated starting amplitude for frequency {frequency_Hz} Hz: {starting_amplitude_uV} uV using mode {amplitude_guess_mode}")
         tuned_amplitude_uV = self.tune_awg_amplitude_for_frequency(frequency_Hz=frequency_Hz, starting_amplitude_uV=starting_amplitude_uV)
 
         # compute transfer function based on the ratio of the applied and default amplitude, and the transfer function at the default amplitude.
@@ -367,7 +453,7 @@ class transfer_finder:
         # append to current transfer function list
         self.current_transfer_function.append((frequency_Hz, transfer_function))
         
-        return transfer_function
+        return transfer_function, tuned_amplitude_uV
     
 
     # function to actually measure the transfer function for the specified frequencies
@@ -378,17 +464,27 @@ class transfer_finder:
         
         transfer_functions (list of float): The list of measured transfer functions for the specified frequencies.
         """
-
+   
         # iterate over all frequencies and measure the transfer function for each frequency
         for index, frequency_Hz in enumerate(self.sweep_frequencies):
             print(f"Measuring transfer function for frequency {frequency_Hz} Hz ({index+1}/{len(self.sweep_frequencies)})")
-            transfer_function = self.measure_transfer_function_for_frequency(frequency_Hz)
-            self.recorded_data_values.append((frequency_Hz, transfer_function))
+            transfer_function, tuned_amplitude_uV = self.measure_transfer_function_for_frequency(frequency_Hz)
+            self.recorded_data_values.append((frequency_Hz, transfer_function, tuned_amplitude_uV))
 
             # execute atom tracking after a specified number of measurement steps
             if (index+1) % self.atom_tracking_interval == 0:
                 print(f"Executing atom tracking after {index+1} measurement steps.")
+
+                # turn AWG off
+                self.awg.stop_playing()
+                print("AWG OFF for atom tracking")
+
+                # tracking
                 self.track_atom()
+
+                # turn AWG on again
+                self.awg.start_playing()
+                print("AWG ON after atom tracking")
 
         # return to default state after the measurement is done
         self.return_to_default_state()
@@ -396,11 +492,22 @@ class transfer_finder:
         # return 0
 
     # function to save the recorded data
-    def save_data(self):
+    def save_data(self, folder_path=None):
         
         # save as json
         # save as a json file
         filename = self.filename
+
+        # get current date and time
+        current_time = time.strftime("%Y%m%d-%H%M%S")
+        filename = f"{filename}_{current_time}.json"
+
+        print(f"Saving data to {filename}...")
+        print("Data to be saved:")
+        print(self.recorded_data_values)
+
+        if folder_path is not None:
+            filename = folder_path + "/" + filename
 
         # TODO: also save settings
         data = {
@@ -409,7 +516,7 @@ class transfer_finder:
             "Header": self.header,
             "Data": {
                 "channel names": [ channel_name for channel_name in self.recorded_data_headers],
-                "values": [ values for _, values in self.recorded_data_values]
+                "values": [ values for values in self.recorded_data_values]
                                 }
         }
         
@@ -436,12 +543,12 @@ if __name__ == '__main__':
     print("Connected to the device")
 
     # test escape_routine
-    save_voltage_V = 1.8
-    save_current_A = 14e-12
+    safe_voltage_V = 1.8
+    safe_current_A = 14e-12
     off_delay_s = 0.1
-    experiment = transfer_finder(nanonis_module=NMod, safe_voltage_V=save_voltage_V, 
+    experiment = transferFinder(nanonis_module=NMod, safe_voltage_V=safe_voltage_V, 
 
-                                 save_current_A=save_current_A,
+                                 safe_current_A=safe_current_A,
                                  off_delay_s=off_delay_s
                                  )
 

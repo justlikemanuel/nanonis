@@ -1,0 +1,16 @@
+{
+    "type": "dummy_data",
+    "version": "1.0",
+    "Header": "Transfer function measurement",
+    "Data": {
+        "channel names": [
+            "frequency_Hz",
+            "transfer_function"
+        ],
+        "values": [
+            1.5e-11,
+            1.5e-11,
+            1.5e-11
+        ]
+    }
+}
