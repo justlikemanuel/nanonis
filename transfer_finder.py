@@ -272,7 +272,9 @@ class transferFinder:
 
         # TODO: find how from this, we can compute the transfer function at the default frequency and default amplitude, which will be used as a reference for estimating the starting amplitude for the tuning process for the other frequencies.
         # compute the transfer function at the default frequency and default amplitude, which will be used as a reference for estimating the starting amplitude for the tuning process for the other frequencies.
-        observed_threshold_voltage_uV = self.find_threshold(x=self.reference_amplitudes_uV, y=[irec for (amplitude_uV, irec) in self.irec_vs_reference_amplitudes])
+        amplitudes, irec_values = zip(*self.irec_vs_reference_amplitudes)
+        # CAUTION: Not all provided reference amplitudes can be played based on limited resolution. Hence, use the actually played amplitudes
+        observed_threshold_voltage_uV = self.find_threshold(x=amplitudes, y=irec_values)
         self.default_transfer_function = self.threshold_voltage_V / observed_threshold_voltage_uV * 1e-6
         print(f"Measured reference Irec: {self.default_i_rec} A at default frequency {self.default_frequency} Hz and default amplitude {self.default_amplitude_uV} uV. Computed transfer function at default frequency: {self.default_transfer_function}")
 
@@ -290,12 +292,12 @@ class transferFinder:
         print("AWG ON")
 
         for index, amplitude_uV in enumerate(self.reference_amplitudes_uV):
-            self.awg.update_continuous_sine_wave_amplitude(new_amplitude_uV=amplitude_uV)
+            matched_amplitude_uV = self.awg.update_continuous_sine_wave_amplitude(new_amplitude_uV=amplitude_uV)
             time.sleep(self.i_rec_integration_time_s)
             irec = self.get_irec()
 
             # add to list
-            self.irec_vs_reference_amplitudes.append((amplitude_uV, irec))
+            self.irec_vs_reference_amplitudes.append((matched_amplitude_uV, irec))
             #print(f"Reference amplitude: {amplitude_uV} uV, recorded Irec: {irec} A")
 
             # for the last value: this is a a separate variable
@@ -322,9 +324,12 @@ class transferFinder:
                 print(f"Achieved Irec at maximum allowed amplitude: {max_current} A, which is {max_current/self.default_i_rec:.2f} times the default Irec.")
                 # TODO: Log the achieved Irec value at the maximum allowed amplitude
                 break
-            self.awg.update_continuous_sine_wave_amplitude(new_amplitude_uV=max_amplitude_uV)
+            matched_amplitude_uV = self.awg.update_continuous_sine_wave_amplitude(new_amplitude_uV=max_amplitude_uV)
             time.sleep(self.i_rec_integration_time_s)
-            max_current = self.get_irec()
+            max_current = self.get_irec() # should be monotonically increasing, so we can just check the last value to see if we have reached the threshold
+
+             # add data point to list
+            self.irec_vs_reference_amplitudes.append((matched_amplitude_uV, max_current))
             iteration += 1
 
         self.max_amplitude_uV = max_amplitude_uV
@@ -377,7 +382,9 @@ class transferFinder:
             else:
                 tuned_amplitude_uV *= 1.1 # increase amplitude by 10%
 
-            self.awg.update_continuous_sine_wave_amplitude(new_amplitude_uV=tuned_amplitude_uV)
+            # clip to int. the awg function will clip to the resolution and return the applied value
+            tuned_amplitude_uV = int(tuned_amplitude_uV)
+            tuned_amplitude_uV = self.awg.update_continuous_sine_wave_amplitude(new_amplitude_uV=tuned_amplitude_uV)
             time.sleep(self.i_rec_integration_time)
             iteration += 1
 
