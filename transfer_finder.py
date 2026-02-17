@@ -1,4 +1,5 @@
 # module to run a measurement that allows computing the transfer function for some frequencies
+import matplotlib
 from nlibs.pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
 from nlibs.pyNanonisMeasurements.nanonisTCP import NanonisModules
 #from nlibs.AWG_M8195A_interface.M8195A import M8195A
@@ -497,6 +498,65 @@ class transferFinder:
         self.return_to_default_state()
         # TODO: implement logging
         # return 0
+
+
+    # function to save the reference Irec values for the reference amplitudes
+    def save_reference_irec_values(self, folder_path=None):
+        # save the recorded Irec values for the reference amplitudes as a json file
+        filename = f"reference_irec_values_{self.default_frequency}Hz_{time.strftime('%Y-%m-%d_%H-%M-%S')}.json"
+        data = {
+            "default_frequency_Hz": self.default_frequency,
+            "reference_amplitudes_uV": [ amplitude for amplitude, _ in self.irec_vs_reference_amplitudes],
+            "irec_values_A": [ irec for _, irec in self.irec_vs_reference_amplitudes]
+        }
+        if folder_path is not None:
+            filename = folder_path + "/" + filename
+
+        with open(filename, 'w') as f:
+            json.dump(
+                data,
+                f,
+                indent=4
+            )
+        print(f"Saved reference Irec values for the reference amplitudes to {filename}")
+
+    
+    # function to plot the reference Irec values for the reference amplitudes
+    def plot_reference_irec_values(self, folder_path=None):
+
+        import matplotlib.pyplot as plt
+        matplotlib.use('Agg') # use non-interactive backend to avoid issues on headless systems
+        # save the recorded Irec values for the reference amplitudes as a json file
+        fixsize = (12,6)
+        plt.figure(figsize=fixsize)
+        font_size = 16
+        title_size = 18
+        plt.rcParams.update({'font.size': font_size})
+        title = "Reference Irec values for the reference amplitudes at " + str(self.default_frequency) + " Hz"
+        plt.title(title, fontsize=title_size, fontweight='bold')
+
+        amplitudes, irec_values = zip(*self.irec_vs_reference_amplitudes)
+        irec_values = np.array(irec_values)
+        amplitudes = 1e-6 * np.array(amplitudes) # convert to volts for plotting
+        print("Shape of amplitudes:", np.shape(amplitudes))
+        print("Shape of irec_values:", np.shape(irec_values))
+        plt.plot(amplitudes, irec_values, marker='x', linestyle='-', color='blue')
+        plt.xlabel("Amplitude (uV)", fontweight='bold')
+        plt.ylabel("Irec (A)", fontweight='bold')
+        plt.grid()
+        plt.tight_layout()
+
+        datetime_string = time.strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"reference_irec_values_{self.default_frequency}Hz_{datetime_string}.png"
+        dpi = 300 # save the plot with high resolution
+
+        if folder_path is not None:
+            filename = folder_path + "/" + filename
+
+        plt.savefig(filename, dpi=dpi)
+        print(f"Saved reference Irec values for the reference amplitudes plot to {filename}")
+
+
 
     # function to save the recorded data
     def save_data(self, folder_path=None):

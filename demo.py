@@ -1,5 +1,6 @@
 # test the transfer finder function
 from transfer_finder import transferFinder
+import numpy as np
 from nlibs.pyNanonisMeasurements.nanonisTCP import NanonisModules
 from nlibs.pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
 from nlibs.AWG_M8195A_interface.M8195A import M8195A
@@ -44,7 +45,8 @@ transfer_finder_params = {
     "awg_reference": awg01,
     "sweep_frequencies": [1000, 10000, 100000],
     "default_frequency": 10000,
-    "reference_amplitudes_uV": [100_000, 200_000, 500_000],
+    "reference_amplitudes_uV": [100_000, 150_000, 200_000, 250_000, 300_000, 350_000, 
+                                400_000, 450_000, 500_000],
     "default_amplitude_uV": 200_000,
     "threshold_voltage_V": 1.5,
     "version": "1.0",
@@ -83,4 +85,10 @@ if not os.path.exists(folder_path):
     os.makedirs(folder_path)
 tf_finder.save_data(folder_path=folder_path)
 
+# plot the reference Irec values for the reference amplitudes
+iref_folder = "irec_reference_values"
+if not os.path.exists(iref_folder):
+    os.makedirs(iref_folder)
+tf_finder.save_reference_irec_values(folder_path=iref_folder)
+tf_finder.plot_reference_irec_values(folder_path=iref_folder)
 print("Transfer function measurement complete.")

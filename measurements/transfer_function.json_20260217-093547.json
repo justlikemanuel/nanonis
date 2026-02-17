@@ -1,0 +1,29 @@
+{
+    "type": "dummy_data",
+    "version": "1.0",
+    "Header": "Transfer function measurement",
+    "Data": {
+        "channel names": [
+            "frequency in Hz",
+            "transfer_function",
+            "tuned_amplitude in uV"
+        ],
+        "values": [
+            [
+                1000,
+                7.5e-12,
+                200000
+            ],
+            [
+                10000,
+                7.5e-12,
+                200000
+            ],
+            [
+                100000,
+                7.5e-12,
+                200000
+            ]
+        ]
+    }
+}
