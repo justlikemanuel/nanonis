@@ -1,7 +1,7 @@
 # module to run a measurement that allows computing the transfer function for some frequencies
 import matplotlib
-from nlibs.pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
-from nlibs.pyNanonisMeasurements.nanonisTCP import NanonisModules
+from libs.pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
+from libs.pyNanonisMeasurements.nanonisTCP import NanonisModules
 #from nlibs.AWG_M8195A_interface.M8195A import M8195A
 import time
 import numpy as np 
@@ -145,6 +145,8 @@ class transferFinder:
         print("Error occured!")
         print("Recovering to default state.")
 
+        # recursive try
+        
         self.return_to_default_state()
 
     # function to go to measurement position and height
@@ -515,7 +517,7 @@ class transferFinder:
         with open(filename, 'w') as f:
             json.dump(
                 data,
-                f,
+                #f,
                 indent=4
             )
         print(f"Saved reference Irec values for the reference amplitudes to {filename}")
@@ -590,10 +592,9 @@ class transferFinder:
         with open(filename, 'w') as f:
             json.dump(
                 data,
-                f,
+                fp,
                 indent=4
             )
-
 
 if __name__ == '__main__':
 
