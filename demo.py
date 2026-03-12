@@ -3,7 +3,7 @@ from transfer_finder import transferFinder
 import numpy as np
 from libs.pyNanonisMeasurements.nanonisTCP import NanonisModules
 from libs.pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
-from libs.AWG_M8195A_interface.M8195A import M8195A
+from libs.AWG_M8195A_interface.M8195A_transfer import M8195A_transfer
 
 # Establish TCP connection to Nanonis
 TCP_IP  = '127.0.0.1'                               # Local host
@@ -12,7 +12,7 @@ version = 14000                                     # Nanonis RT Engine version 
 
 # Establish connection to AWG
 awg_id = "TCPIP0::localhost::inst0::INSTR"
-awg01 = M8195A(awg_id)
+awg01 = M8195A_transfer(awg_id)
 
 
 # connect to nanonis and load modules
@@ -21,40 +21,50 @@ NMod = NanonisModules.NanonisModules(NTCP)          # Load all nanonis modules
 
 
 # set up all parameters 
-transfer_finder_params = {
-    "nanonis_module": NMod,    
-    "awg_reference": awg01,
-    "safe_voltage_V": 2.067, 
-    "safe_current_A": 1e-9,
-    "safe_x_position_m": 3e-9,
-    "safe_y_position_m": 3e-9,
-    "z_off_delay_s": 2,
-    "atom_tracking_parameters": {
+"""
+
+class transferFinder:
+    def __init__(self, nanonis_module,
+                i_rec_integration_time_s,
+                amplitude_guess_mode,
+                old_transfer_function,
+                atom_tracking_parameters,
+                atom_tracking_time_s, atom_tracking_interval,
+                awg_reference, awg_settling_time,
+                sweep_frequencies, reference_frequency,
+                use_active_state,
+                reference_amplitudes,
+                measurement_voltage,
+                filename, header,
+                 ):
+"""
+
+print("Lets hope this works...")
+
+# set up some parameters
+atom_tracking_parameters = {
         "Igain": 570e-12,
         "Frequency": 10.0,
         "Amplitude": 100e-12,
         "Phase": 0.0,
         "SwitchOffDelay": 0.5
-    },      
-    "atom_tracking_time_s": 5,
-    "atom_tracking_interval": 10,
-    "i_rec_integration_time_s": 1,
-    "max_allowed_amplitude_uV": 500_000,
-    "amplitude_guess_mode": "fixed",
-    "old_transfer_function": None, # if you have a previous transfer function, you can provide it here as a dict with frequencies as keys and amplitudes as values. This will be used as a starting point for the optimization.
-    "sweep_frequencies": [1000, 10000, 100000],
-    "default_frequency": 10000,
-    "reference_amplitudes_uV": [100_000, 150_000, 200_000, 250_000, 300_000, 350_000, 
-                                400_000, 450_000, 500_000],
-    "default_amplitude_uV": 200_000,
-    "threshold_voltage_V": 2.5,
-    "version": [1, 0, 0],
-    "filename": "transfer_function.json",
-    "header": "Transfer function measurement"
 }
 
-print("Lets hope this works...")
-tf_finder = transferFinder(**transfer_finder_params)
+tf_finder = transferFinder(
+    nanonis_module=NMod,
+    i_rec_integration_time_s=0.1,
+    amplitude_guess_mode="reference_irec",
+    old_transfer_function=None,
+    atom_tracking_settings=atom_tracking_parameters,
+    atom_tracking_time_s=4, atom_tracking_interval=5,
+    awg_reference=awg01, awg_settling_time=0.1,
+    sweep_frequencies=[10, 100, 1000], reference_frequency=10,
+    use_active_state=True,
+    reference_amplitudes=[0.01, 0.05, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5],
+    measurement_voltage=0.5,
+    filename="transfer_function_measurement",
+    header={"comment": "This is a test measurement for the transfer function optimization."}
+)
 
 print("Starting transfer function optimization...")
 

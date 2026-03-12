@@ -2,25 +2,25 @@
 import matplotlib
 from libs.pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
 from libs.pyNanonisMeasurements.nanonisTCP import NanonisModules
-#from nlibs.AWG_M8195A_interface.M8195A import M8195A
+
 import time
 import numpy as np 
 import json
+import datetime
 
 class transferFinder:
-    def __init__(self, nanonis_module, safe_voltage_V, safe_current_A,
-                safe_x_position_m, safe_y_position_m, 
+    def __init__(self, nanonis_module,
                 i_rec_integration_time_s,
-                max_allowed_amplitude_uV,
                 amplitude_guess_mode,
                 old_transfer_function,
-                atom_tracking_parameters,
+                atom_tracking_settings,
                 atom_tracking_time_s, atom_tracking_interval,
-                z_off_delay_s, awg_reference,
-                sweep_frequencies, default_frequency,
-                reference_amplitudes_uV, default_amplitude_uV,
-                threshold_voltage_V,
-                version, filename, header,
+                awg_reference, awg_settling_time,
+                sweep_frequencies, reference_frequency,
+                use_active_state,
+                reference_amplitudes,
+                measurement_voltage,
+                filename, header,
                  ):
         
         """
@@ -28,64 +28,77 @@ class transferFinder:
 
         Args:
             - nanonis_module: The NanonisModules object to interact with the Nanonis system.
-            - safe_voltage_V: The voltage to set in case of an error to protect the sample and tip.
-            - safe_current_A: The current to set in case of an error to protect the sample and tip.
-            - safe_x_position_m: The x position to set in case of an error to protect the sample and tip.
-            - safe_y_position_m: The y position to set in case of an error to protect the sample and tip.
-            - i_rec_integration_time_s: The integration time to use when recording the Irec value, in seconds.
-            - max_allowed_amplitude_uV: The maximum amplitude to apply with the AWG during the tuning process, in microvolts.
+            - i_rec_integration_time_s: The integration time to use for recording the Irec value.
             - amplitude_guess_mode: The strategy to use for estimating the starting amplitude for the tuning process. Options are "known" and "half". "known" uses the recorded Irec values for the reference amplitudes to find the two reference frequencies that are closest to the desired frequency, and performs a linear interpolation to estimate the Irec value at the desired frequency, then finds the corresponding amplitude. "half" assumes 0.5 transmission to estimate the starting amplitude.
             - old_transfer_function: The old transfer function to use for estimating the starting amplitude for the tuning process. 
                 Must be an array of frequency and transfer function value.
-            - atom_tracking_parameters: Dictionary containing the parameters to use for atom tracking, e.g. a dictionary
+            - atom_tracking_settings: Dictionary containing the settings to use for atom tracking, e.g. a dictionary of parameters.
             - atom_tracking_time_s: The time to track the atom for after each measurement step.
             - atom_tracking_interval: The inerval after how many measurement steps should be executed again.
-            - z_off_delay_s: The time to wait after switching off the z-controller before setting
-                            the current and switching the controller back on, to allow for height averaging.
+                                        If atom tracking shall not be used, set this to a value larger than the number of measurement steps.
             - awg_reference: The reference to the AWG to use for outputting the reference
+            - awg_settling_time: The time to wait after changing the AWG settings before recording the Irec value, to allow the system to stabilize.
             - sweep_frequencies: The frequencies for which to measure the transfer function.
-            - default_frequency: The default frequency to use for measuring the reference Irec value.
-            - reference_amplitudes_uV: The reference amplitudes to use for recording the Irec values, in microvolts.
-            - threshold_voltage_V: The voltage threshold to use for the escape routine. If the recorded voltage exceeds this threshold, the escape routine will be executed to protect the sample and tip.
-            - version: The version of the experiment, to be saved in the data file.
+            - reference_frequency: The frequency to use for measuring the reference Irec value.
+            - reference_amplitudes: The reference amplitudes to use for recording the Irec values, in Volts.
+            - measurement_voltage: The voltage used for which the measurement shall be run.
             - filename: The name of the file to save the data to.
             - header: The header to save in the data file, e.g. a description of the experiment and the settings used.
         """
 
+        # dummy parameters (should be used with the constructor)
+        self.height_averaging_period_s = 0.5 # time to wait for the height to stabilize after switching off the z-controller, before recording the Irec value for the transfer function measurement
+        self.default_frequency = reference_frequency
         
-        self.nanonis_module = nanonis_module
-        self.safe_voltage = safe_voltage_V
-        self.safe_current_A = safe_current_A
-        self.buffer_time_s = 1e-3
+        # get current x_pos, y_pos, voltage and current to be able to return to this state
+        self.initial_x_position_m = self.nanonis_module.FolMe.XPosGet()
+        self.initial_y_position_m = self.nanonis_module.FolMe.YPosGet()
+        self.initial_voltage = self.nanonis_module.Bias.Get()
+        self.initial_current_A = self.nanonis_module.ZCtl.SetpntGet()
+        
+        # get current z-controller settings
+        self.zcontroler_switch_off_delay_s = self.nanonis_module.ZCtl.SwitchOffDelayGet() # p_gain, time_constant, i_gain
+        gain = self.nanonis_module.ZCtl.GainGet() # p_gain, time_constant, i_gain
+        self.p_gain = gain[0]
+        self.time_constant = gain[1]
+
+        # AWG parameters
         self.awg = awg_reference
+        self.awg_settling_time = awg_settling_time
+
+        # nanonis        
+        self.nanonis_module = nanonis_module
         self.i_rec_integration_time_s = i_rec_integration_time_s
 
-        # save recovery parameters
-        self.safe_x_position_m = safe_x_position_m
-        self.safe_y_position_m = safe_y_position_m
-        
+        # escape routine
+        self.voltage_tolerance = 1e-5
+        self.current_tolerance = 0.1e-12
+        self.is_in_error_state = False # flag to indicate if the system is in an error state, e.g. due to tip crash or excessive current
+        self.escape_routine_voltage_step = 1e-3 # voltage step to apply in the escape routine
+        self.escape_routine_current_step = 1e-12 # current step to apply in the escape routine       
+        self.escape_routine_time_constant = 0.5  # time step between the update of the bias voltage
+
+
         # Sweep parameters:
         self.sweep_frequencies = sweep_frequencies
-        self.default_frequency = default_frequency
-        self.default_amplitude_uV = default_amplitude_uV
-        self.reference_amplitudes_uV = reference_amplitudes_uV
-        self.threshold_voltage_V = threshold_voltage_V
-        self.max_allowed_amplitude_uV = max_allowed_amplitude_uV
+        self.measurement_voltage = measurement_voltage
+    
+   
 
-        self.atom_tracking_parameters = atom_tracking_parameters
-        # apply the parameters to the atom tracking module
-        self.nanonis_module.ATrack.PropsSet(**self.atom_tracking_parameters)
+        self.atom_tracking_settings = atom_tracking_settings
+        # apply the settings to the atom tracking module
+        self.nanonis_module.ATrack.PropsSet(**self.atom_tracking_settings)
 
         self.atom_tracking_period_s = atom_tracking_time_s
         self.atom_tracking_interval = atom_tracking_interval
-        self.height_averaging_period_s = z_off_delay_s
 
         # logging parameters
-        self.irec_vs_reference_amplitudes = []
+        self.start_time = time.strftime("%Y-%m-%d_%H-%M-%S")
+        self.session_path = self.get_session_path()
         self.filename = filename
-        self.version = version
+        self.version = [1, 0, 0]
         self.header = header
-
+        self.irec_vs_reference_amplitudes = []
 
         # compensation parameters
         self.amplitude_guess_mode = amplitude_guess_mode
@@ -145,9 +158,66 @@ class transferFinder:
         print("Error occured!")
         print("Recovering to default state.")
 
-        # recursive try
+       
+        # Method: recursive try
+        """
+        1. Activate z-controller    
+        2. Find current voltage and current values
+        3. Set the bias voltage to the 
+        4. if another error occurs, get again the current voltage and current values
+        """
+        #self.return_to_default_state()
+
+        if not self.is_in_error_state:
+            self.is_in_error_state = True
+
+        try:
+            # set parameters on z-controller and activate
+            self.nanonis_module.ZCtl.SwitchOffDelaySet(0)            
+            self.nanonis_module.ZCtl.GainSet(self.p_gain, self.time_constant) # nochmal ausschalten davor?
+            self.nanonis_module.ZCtl.OnOffSet(1)
+
+            # find current voltage value and change to default voltage
+            measured_voltage = self.nanonis_module.Bias.Get()
+
+            diff_voltage = measured_voltage - self.initial_voltage
+
+            # iterate the voltage in the direction of the default voltage until we are back in the pre-measurement state
+            while np.abs(diff_voltage) > self.voltage_tolerance:
+                if abs(diff_voltage) < self.escape_routine_voltage_step:
+                    step_voltage = diff_voltage
+                else:
+                    step_voltage = self.escape_routine_voltage_step * np.sign(diff_voltage)
+
+                new_voltage = measured_voltage - step_voltage
+                self.nanonis_module.Bias.Set(new_voltage)
+                time.sleep(self.escape_routine_time_constant)
+
+                measured_voltage = self.nanonis_module.Bias.Get()
+                diff_voltage = measured_voltage - self.initial_voltage   
+
+            # iterate the current in the direction of the default current until we are back in the pre-measurement state
+            measured_current = self.nanonis_module.ZCtl.SetpntGet()
+            diff_current = measured_current - self.initial_current_A
+
+            while np.abs(diff_current) > self.current_tolerance:
+                if abs(diff_current) < self.escape_routine_current_step:
+                    step_current = diff_current
+                else:
+                    step_current = self.escape_routine_current_step * np.sign(diff_current)
+
+                new_current = measured_current - step_current
+                self.nanonis_module.ZCtl.SetpntSet(new_current)
+                time.sleep(self.escape_routine_time_constant)
+
+                measured_current = self.nanonis_module.ZCtl.SetpntGet()
+                diff_current = measured_current - self.initial_current_A
+
         
-        self.return_to_default_state()
+            
+        except Exception as e:
+            print(f"Error during escape routine: {e}. Retrying...")
+            self.escape_routine()
 
     # function to go to measurement position and height
     def prepare_measurement(self):
@@ -156,7 +226,7 @@ class transferFinder:
         """
 
         # move to default setpoint
-        self.return_to_default_state()
+        #self.return_to_default_state()
 
         # run atom tracking
         print("Starting atom tracking.")
@@ -167,6 +237,7 @@ class transferFinder:
 
         # turn off the z-controller to allow for height averaging
         self.nanonis_module.ZCtl.OnOffSet(0)
+        print("Z-controller turned off for height averaging.")
 
 
     # function to track the atom
@@ -206,6 +277,14 @@ class transferFinder:
     ############### Measurement functions ###############
     #####################################################
     
+    # function to get the session path
+    def get_session_path(self):
+        """
+        Function to get the session path of the current measurement. This can be used for saving the data in the same folder as the measurement data.
+        Returns
+            - session_path (str): The path to the current measurement session.
+        """
+        return self.nanonis_module.Util.SessionPathGet()
 
     # function to get the current Irec value
     def get_irec(self):
@@ -258,9 +337,7 @@ class transferFinder:
         """
 
         # configure AWG to output the reference signal
-        self.awg.configure_continuous_sine_wave(channel_number=1, frequency_Hz=self.default_frequency, 
-                                                num_periods=1, starting_amplitude_uV=self.default_amplitude_uV, approximate_frequency=False)
-
+        self.awg.configure_continuous_sine_wave
         # turn on the AWG output
         self.awg.start_playing()
         # wait for the system to stabilize
@@ -278,7 +355,7 @@ class transferFinder:
         amplitudes, irec_values = zip(*self.irec_vs_reference_amplitudes)
         # CAUTION: Not all provided reference amplitudes can be played based on limited resolution. Hence, use the actually played amplitudes
         observed_threshold_voltage_uV = self.find_threshold(x=amplitudes, y=irec_values)
-        self.default_transfer_function = self.threshold_voltage_V / observed_threshold_voltage_uV * 1e-6
+        self.default_transfer_function = self.measurement_voltage / observed_threshold_voltage_uV * 1e-6
         print(f"Measured reference Irec: {self.default_i_rec} A at default frequency {self.default_frequency} Hz and default amplitude {self.default_amplitude_uV} uV. Computed transfer function at default frequency: {self.default_transfer_function}")
 
 
@@ -503,17 +580,16 @@ class transferFinder:
 
 
     # function to save the reference Irec values for the reference amplitudes
-    def save_reference_irec_values(self, folder_path=None):
+    def save_reference_irec_values(self):
         # save the recorded Irec values for the reference amplitudes as a json file
-        filename = f"reference_irec_values_{self.default_frequency}Hz_{time.strftime('%Y-%m-%d_%H-%M-%S')}.json"
+        filename = f"{self.session_path}/reference_irec_values_{self.default_frequency}Hz_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+        
         data = {
             "default_frequency_Hz": self.default_frequency,
             "reference_amplitudes_uV": [ amplitude for amplitude, _ in self.irec_vs_reference_amplitudes],
             "irec_values_A": [ irec for _, irec in self.irec_vs_reference_amplitudes]
         }
-        if folder_path is not None:
-            filename = folder_path + "/" + filename
-
+        
         with open(filename, 'w') as f:
             json.dump(
                 data,
@@ -524,7 +600,7 @@ class transferFinder:
 
     
     # function to plot the reference Irec values for the reference amplitudes
-    def plot_reference_irec_values(self, folder_path=None):
+    def plot_reference_irec_values(self):
 
         import matplotlib.pyplot as plt
         matplotlib.use('Agg') # use non-interactive backend to avoid issues on headless systems
@@ -549,11 +625,8 @@ class transferFinder:
         plt.tight_layout()
 
         datetime_string = time.strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"reference_irec_values_{self.default_frequency}Hz_{datetime_string}.png"
+        filename = f"{self.session_path}/reference_irec_values_{self.default_frequency}Hz_{datetime_string}.png"
         dpi = 300 # save the plot with high resolution
-
-        if folder_path is not None:
-            filename = folder_path + "/" + filename
 
         plt.savefig(filename, dpi=dpi)
         print(f"Saved reference Irec values for the reference amplitudes plot to {filename}")
@@ -561,27 +634,22 @@ class transferFinder:
 
 
     # function to save the recorded data
-    def save_data(self, folder_path=None):
-        
-        # save as json
-        # save as a json file
-        filename = self.filename
-
+    def save_data(self):
         # get current date and time
         current_time = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"{filename}_{current_time}.json"
+        filename = f"{self.session_path}/{self.filename}_{current_time}"
 
         print(f"Saving data to {filename}...")
         print("Data to be saved:")
         print(self.recorded_data_values)
 
-        if folder_path is not None:
-            filename = folder_path + "/" + filename
 
         # TODO: also save settings
         data = {
             "type": "dummy_data",
             "version": self.version,
+            "start_time": self.start_time,
+            "end_time": current_time,
             "Header": self.header,
             "Data": {
                 "channel names": [ channel_name for channel_name in self.recorded_data_headers],
@@ -592,10 +660,9 @@ class transferFinder:
         with open(filename, 'w') as f:
             json.dump(
                 data,
-                fp,
+                #f,
                 indent=4
             )
-
 if __name__ == '__main__':
 
     print("This is a unit test")

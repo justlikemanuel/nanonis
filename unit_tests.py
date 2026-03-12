@@ -1,5 +1,5 @@
 # scripts to test the transfer_finder unit
-from libs.AWG_M8195A_interface import M8195A
+#from libs.AWG_M8195A_interface import M8195A
 from transfer_finder import transferFinder
 from libs.pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
 from libs.pyNanonisMeasurements.nanonisTCP import NanonisModules
@@ -13,3 +13,9 @@ version = 14000                                     # Nanonis RT Engine version 
 # connect to nanonis and load modules
 NTCP = nanonisTCP(TCP_IP, TCP_PORT, version=version)
 NMod = NanonisModules.NanonisModules(NTCP)          # Load all nanonis modules
+
+# test functions
+def get_session_path():
+    return NMod.Util.SessionPathGet()
+
+print("Session path:", get_session_path())
