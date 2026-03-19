@@ -1,4 +1,9 @@
-# scripts to test the transfer_finder unit
+# go one folder up
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+
 #from libs.AWG_M8195A_interface import M8195A
 from transfer_finder import transferFinder
 from libs.pyNanonisMeasurements.nanonisTCP.nanonisTCP import nanonisTCP
