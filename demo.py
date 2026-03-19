@@ -64,11 +64,6 @@ tf_finder.record_irec_for_references()
 
 logger.info("Reference recording complete.")
 
-# find default transfer function
-tf_finder.find_reference_parameters()
-
-logger.info("Reference parameter finding complete.")
-
 # measure transfer function
 tf_finder.measure_transfer_function_for_all_frequencies()
 
