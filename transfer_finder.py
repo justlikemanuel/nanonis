@@ -15,7 +15,8 @@ logger = logging.getLogger("transfer_finder")
 
 class transferFinder:
     def __init__(self, nanonis_module,
-                i_rec_integration_time_s = 0.1,
+                 get_nanonis_settings = False,
+                integration_time = 0.1,
                 amplitude_guess_mode = "closest",
                 old_compensation_amplitudes = None,
                 atom_tracking_settings = None,
@@ -44,7 +45,8 @@ class transferFinder:
 
         Args:
             - nanonis_module: The NanonisModules object to interact with the Nanonis system.
-            - i_rec_integration_time_s: The integration time to use for recording the Irec value.
+            - get_nanonis_settings: Flag which opens the parameter selection GUI if true.
+            - integration_time: The integration time to use for recording the Irec value.
             - amplitude_guess_mode: The strategy to use for estimating the starting amplitude for the tuning process. Options are "known" and "half". "known" uses the recorded Irec values for the reference amplitudes to find the two reference frequencies that are closest to the desired frequency, and performs a linear interpolation to estimate the Irec value at the desired frequency, then finds the corresponding amplitude. "half" assumes 0.5 transmission to estimate the starting amplitude.
             - old compensation_amplitudes (list of tuples): The list of previously evaluated frequencies and their corresponding compensation amplitudes.
             - atom_tracking_settings: Dictionary containing the settings to use for atom tracking, e.g. a dictionary of parameters.
@@ -62,7 +64,7 @@ class transferFinder:
             - reference_amplitude: The amplitude at which the reference Irec value shall be recorded.
             - max_sweep_amplitude: The maximum amplitude to use for the sweep, to protect the tip and sample. The actual amplitudes used for the sweep will be generated based on this value and the number of amplitudes.
             - num_sweep_amplitudes: The number of amplitudes to use for the sweep between 0 and the maximum sweep amplitude.
-            - data_channels: A tupel of nanonis channel label and desired header for the recorded data.
+            - data_channels: Labels of the channels in Nanonis that shall be logged.
             - use_active_state: TODO: check with Nicolaj again.
             - measurement_voltage: The voltage used for which the measurement shall be run.
             - irec_tolerance: The tolerance for the Irec value when comparing to the reference Irec value for the compensation amplitude tuning.
@@ -90,7 +92,7 @@ class transferFinder:
 
         # nanonis        
         self.nanonis_module = nanonis_module
-        self.i_rec_integration_time_s = i_rec_integration_time_s
+        self.integration_time = integration_time
 
         # get current x_pos, y_pos, voltage and current to be able to return to this state
         x_pos, y_pos = self.nanonis_module.FolMe.XYPosGet(Wait_for_newest_data=True)
@@ -146,42 +148,13 @@ class transferFinder:
         self.header = header
         self.irec_vs_sweep_amplitudes = []
 
-        # TODO: use indices or names?
-        self.data_indices = [
-                            0, # current
-                            24, # Bias
-                            30, # z-controller setpoint
-        ]
-
-
-
         self.recorded_data_headers = [
             "frequency (Hz)",
             "compensation_amplitude (V)",
-            "Current (A)",
-            "Bias (V)",
-            "z-controller setpoint (m)",
         ]
+        self.nanonis_channels = data_channels
 
-        #self.nanonis_channel_names = []
-
-        # when using channel indices for logging
-        channel_names = self.nanonis_module.Sig.NamesGet()
-
-        # add the headers for the recorded data channels
-        for channel_label, channel_header in data_channels:
-            self.recorded_data_headers.append(channel_header)
-
-            # when using channel labels for logging
-            # self.nanonis_channel_names.append(channel_label)
-
-            # when using data indices for logging
-            # if channel name is not in the list of channel names, raise error
-            if channel_label not in channel_names:
-                raise ValueError(f"Channel label {channel_label} not found in the list of channel names: {channel_names}")
-            channel_index = channel_names.index(channel_label)
-            self.data_indices.append(channel_index)
-
+        self.recorded_data_headers.extend(self.nanonis_channels)
         self.recorded_data_values = [] # list of tuples (frequency, tuned_amplitude, current, bias, z_controller_setpoint,...)
 
         # compensation parameters
@@ -191,7 +164,7 @@ class transferFinder:
 
         # store all parameters in a dictionary for logging
         self.nanonis_settings = {
-                    "i_rec_integration_time_s": i_rec_integration_time_s,
+                    "integration_time": integration_time,
                     "atom_tracking_settings": atom_tracking_settings,
                     "atom_tracking_time": atom_tracking_time,
                     "atom_tracking_interval": atom_tracking_interval,
@@ -228,9 +201,9 @@ class transferFinder:
         print(f"Session path: {self.session_path}")        
         
         # get the nanonis parameters (to put into the logged file)
-        #meas = MeasurementBase(self.nanonis_module)
-        #self.nanonis_parameters = meas.nanonisSettingsGet(False)
-        self.nanonis_parameters = {"Dummy_parameter": 0} # the nanonis function above just broke...
+        meas = MeasurementBase(self.nanonis_module)
+        self.nanonis_parameters = meas.nanonisSettingsGet(get_nanonis_settings)
+        #self.nanonis_parameters = {"Dummy_parameter": 0} # the nanonis function above just broke...
 
     ###################################################
     ############## Positioning functions ##############
@@ -349,6 +322,7 @@ class transferFinder:
             self.escape_routine()
 
         # TODO: what shall happen after recovering?
+        # abspeichern
         exit(1)
 
 
@@ -417,35 +391,24 @@ class transferFinder:
     # function to get the current Irec value
     def get_irec(self):
         """
-        Function to get the current Irec value. The integration time can be set in the constructor.
+        Function to get the current Irec value.
 
         Returns
         Irec (float): The recorded Irec value in Amperes.
         """
-        # TODO: Check if cur.get or signal.valget get is better
-
-        ####### signal.valget method:
-        current_values_A = []
-        start_time = time.perf_counter()
-        while time.perf_counter() - start_time < self.i_rec_integration_time_s:
-            i_tun = self.nanonis_module.Sig.ValGet(0, True) # channel 0 is current, we wait for next update
-            current_values_A.append(i_tun)
-
-        # compute the average current value over the integration time
-        irec = np.mean(current_values_A)
-
-        ######## cur.get method:
-        # set the integration time
-        # get the Irec value
-        #irec = self.nanonis_module.Cur.Get()
-
-        return irec
+        value = self.nanonis_module.Sig.MeasSig(sig_names = "Current (A)", averaging_time=self.integration_time) # returns dictionary with signal names as keys and measured values as values
+        
+        # if current not in the returned dictionary, raise error
+        if "Current (A)" not in value:
+            raise ValueError("Current (A) not found in the measured signals. Check if the channel name is correct and if the signal is properly configured in Nanonis.")
+        
+        return value["Current (A)"]
 
     # record Irec vs the reference amplitudes
-    def record_irec_for_references(self):
+        """ def record_irec_for_references(self):
         
         """
-        Function to record the Irec value for the reference amplitude, and all sweep amplitudes at the reference frequency.
+        #Function to record the Irec value for the reference amplitude, and all sweep amplitudes at the reference frequency.
         """
         try:
             # configure AWG to output the reference signal
@@ -472,7 +435,8 @@ class transferFinder:
 
         except Exception as e:
             print(f"Error while recording Irec for reference amplitudes: {e}. Executing escape routine.")
-            self.escape_routine()
+            self.escape_routine
+            """
    
     # function to tune awg amplitude for a specific frequency to match reference irec
     def tune_awg_amplitude_for_frequency(self, frequency, starting_amplitude = 0.1,
@@ -518,7 +482,7 @@ class transferFinder:
                 tuned_amplitude = self.tuning_controller.V_out
                 
                 self.awg.update_continuous_sine_wave_amplitude(new_amplitude=tuned_amplitude)
-                time.sleep(self.i_rec_integration_time_s)
+                time.sleep(self.integration_time)
                 i_rec = self.get_irec()
                 iteration += 1
                 
@@ -534,7 +498,7 @@ class transferFinder:
 
                 # the awg function will clip to the resolution and return the applied value
                 tuned_amplitude = self.awg.update_continuous_sine_wave_amplitude(new_amplitude=tuned_amplitude)
-                time.sleep(self.i_rec_integration_time_s)
+                time.sleep(self.integration_time)
                 iteration +=1 
                 """
 
@@ -615,8 +579,16 @@ class transferFinder:
             tuned_amplitude = self.tune_awg_amplitude_for_frequency(frequency=frequency, starting_amplitude=starting_amplitude)
 
             # get data for all elements in the data_indices list and add the values to the recorded data list
-            values  = self.nanonis_module.Sig.ValsGet(signal_index_list=self.data_indices, wait_for_newest_data=True)
-            data_list = [frequency, tuned_amplitude, *values]
+            values = self.nanonis_module.Sig.MeasSig(sig_names = self.nanonis_channels, averaging_time=self.integration_time) # returns dictionary with signal names as keys and measured values as values
+
+            data_list = [frequency, tuned_amplitude]
+            
+            for channel in self.nanonis_channels:
+                # if channel not in the returned dictionary, raise error
+                if channel not in values:
+                    raise ValueError(f"{channel} not found in the measured signals. Check if the channel name is correct and if the signal is properly configured in Nanonis.")
+                data_list.append(values[channel])
+
             self.recorded_data_values.append(data_list)
             return 0
 
