@@ -218,17 +218,19 @@ class transferFinder:
                     "max_sweep_amplitude": max_sweep_amplitude,
                     "num_sweep_amplitudes": num_sweep_amplitudes,
                 }
+        
         self.tuning_settings = {
                     "tuning_pgain": tuning_pgain,
                     "tuning_integration_time_constant": tuning_integration_time_constant,
                     "irec_tolerance": irec_tolerance,
                 }
 
-
+        print(f"Session path: {self.session_path}")        
+        
         # get the nanonis parameters (to put into the logged file)
-        meas = MeasurementBase(self.nanonis_module)
-        self.nanonis_parameters = meas.nanonisSettingsGet(False)
-
+        #meas = MeasurementBase(self.nanonis_module)
+        #self.nanonis_parameters = meas.nanonisSettingsGet(False)
+        self.nanonis_parameters = {"Dummy_parameter": 0} # the nanonis function above just broke...
 
     ###################################################
     ############## Positioning functions ##############
@@ -347,6 +349,9 @@ class transferFinder:
             self.escape_routine()
 
         # TODO: what shall happen after recovering?
+        exit(1)
+
+
     # function to go to measurement position and height
     def prepare_measurement(self):
         """
