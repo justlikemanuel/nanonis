@@ -24,12 +24,15 @@ class transferFinder:
                 atom_tracking_interval = 5,
                 awg_reference = None, 
                 awg_settling_time = 0.1,
+                granularity_frequency = 1e5,
                 lockin_frequency = 1e3,
                 tuning_pgain = 0.5,
                 tuning_integration_time_constant = 1.0,
+                max_tune_iterations = 10,
                 sweep_frequencies = None,
                 reference_frequency = None,
-                reference_amplitude = 0.5,
+                reference_STM_amplitude = 0.5,
+                reference_transmission = 0.5,
                 max_sweep_amplitude = 0.5,
                 num_sweep_amplitudes = 5,
                 data_channels = None,
@@ -55,13 +58,14 @@ class transferFinder:
                                         If atom tracking shall not be used, set this to a value larger than the number of measurement steps.
             - awg_reference: The reference to the AWG to use for outputting the reference
             - awg_settling_time: The time to wait after changing the AWG settings before recording the Irec value, to allow the system to stabilize.
+            - granularity_frequency: The granularity frequency to use for the AWG waveform generation. This should be chosen based on the desired frequencies to ensure that the generated waveforms meet the granularity requirements of the AWG.
             - lockin_frequency: The frequency of the lock-in amplifier.
             - tuning_pgain: The proportional gain to use for the tuning process.
             - tuning_integration_time_constant: The time constant for the integral action in the tuning process.
             - tolerance: The tolerance for the tuning process (relative to the current measured at reference amplitude and reference frequency).
             - sweep_frequencies: The frequencies for which the transfer function shall be measured.
             - reference_frequency: The frequency at which the reference Irec value shall be recorded.
-            - reference_amplitude: The amplitude at which the reference Irec value shall be recorded.
+            - reference_STM_amplitude: The amplitude at the STM (!!) for which the reference Irec value shall be recorded.
             - max_sweep_amplitude: The maximum amplitude to use for the sweep, to protect the tip and sample. The actual amplitudes used for the sweep will be generated based on this value and the number of amplitudes.
             - num_sweep_amplitudes: The number of amplitudes to use for the sweep between 0 and the maximum sweep amplitude.
             - data_channels: Labels of the channels in Nanonis that shall be logged.
@@ -75,18 +79,18 @@ class transferFinder:
         
         # dummy parameters (TODO: should be used with the constructor)
         self.height_averaging_period_s = 0.5 # time to wait for the height to stabilize after switching off the z-controller, before recording the Irec value for the transfer function measurement
-        self.reference_frequency = reference_frequency
         self.max_allowed_amplitude = 1 # maximum allowed amplitude in Volts to protect the sample and tip, TODO: find better parameter for this, maybe based on the recorded Irec values for the reference amplitudes
         
         
         # AWG parameters
         self.awg = awg_reference
         self.awg_settling_time = awg_settling_time
+        self.granularity_frequency = granularity_frequency
         self.lockin_frequency = lockin_frequency
 
         # create integrator
         self.tuning_controller = PIController(Kp=tuning_pgain, Ti=tuning_integration_time_constant, 
-                                              dt=0.1, V_min=0.0, V_max=self.max_allowed_amplitude)
+                                              dt=0.1, V_min=0.1, V_max=self.max_allowed_amplitude)
         self.irec_tolerance = irec_tolerance
 
 
@@ -129,7 +133,9 @@ class transferFinder:
         logger.info(f"Generated reference amplitudes: {self.sweep_amplitudes} V")
 
         self.measurement_voltage = measurement_voltage
-        self.reference_amplitude = reference_amplitude
+        self.reference_transmission = reference_transmission
+        self.reference_STM_amplitude = reference_STM_amplitude
+        self.reference_amplitude = self.reference_STM_amplitude / self.reference_transmissionself.reference_frequency = reference_frequency
         self.old_compensation_amplitudes = old_compensation_amplitudes
     
    
@@ -184,10 +190,12 @@ class transferFinder:
         
         self.awg_settings = {
                     "awg_settling_time": awg_settling_time,
+                    "granularity_frequency": granularity_frequency,
                     "lockin_frequency": lockin_frequency,
                     "sweep_frequencies": sweep_frequencies,
                     "reference_frequency": reference_frequency,
-                    "reference_amplitude": reference_amplitude,
+                    "reference_STM_amplitude": reference_STM_amplitude,
+                    "refererence_transmission": reference_transmission,
                     "max_sweep_amplitude": max_sweep_amplitude,
                     "num_sweep_amplitudes": num_sweep_amplitudes,
                 }
@@ -196,14 +204,32 @@ class transferFinder:
                     "tuning_pgain": tuning_pgain,
                     "tuning_integration_time_constant": tuning_integration_time_constant,
                     "irec_tolerance": irec_tolerance,
+                    "max_tune_iterations": max_tune_iterations,
                 }
 
         print(f"Session path: {self.session_path}")        
         
         # get the nanonis parameters (to put into the logged file)
         meas = MeasurementBase(self.nanonis_module)
-        self.nanonis_parameters = meas.nanonisSettingsGet(get_nanonis_settings)
-        #self.nanonis_parameters = {"Dummy_parameter": 0} # the nanonis function above just broke...
+        #self.nanonis_parameters = meas.nanonisSettingsGet(get_nanonis_settings)
+        self.nanonis_parameters = {"Dummy_parameter": 0} # the nanonis function above just broke...
+
+
+    # Function to check validity of the settings and parameters
+    def check_settings_validity(self):
+        """
+        Function to check the validity of the settings and parameters. This can include checks such as:
+            - Are there any nanonis settings that may cause failure?
+            - Are the specified frequencies within the range of the AWG and lock-in amplifier?
+            - Is the specified integration time reasonable for the measurement?
+            - Are the specified amplitudes within the limits of the AWG and safe for the sample and tip?
+            - Are the specified Nanonis channels correctly configured in Nanonis?
+            - etc.
+        If any check fails, an error should be raised and the measurement should not be started.
+        """
+        # TODO: implement function :)
+        pass
+
 
     ###################################################
     ############## Positioning functions ##############
@@ -226,7 +252,7 @@ class transferFinder:
             # TODO: what is better, set off-delay to 0 and then deactivate, or deactivate immediately and wait for some time? 
 
             # set off delay to 0
-            self.nanonis_module.ZCtl.SwitchOffDelaySet(0)
+            self.nanonis_module.ZCtl.SwitchOffDelaySet(self.initial_z_controler_switch_off_delay_s)
 
             # deactivate controller
             if self.nanonis_module.ZCtl.OnOffGet()==1:
@@ -277,7 +303,7 @@ class transferFinder:
 
         try:
             # set parameters on z-controller and activate
-            self.nanonis_module.ZCtl.SwitchOffDelaySet(0)            
+            self.nanonis_module.ZCtl.SwitchOffDelaySet(self.initial_z_controler_switch_off_delay_s)
             self.nanonis_module.ZCtl.GainSet(self.initial_z_p_gain, self.initial_z_time_constant) # nochmal ausschalten davor?
             self.nanonis_module.ZCtl.OnOffSet(1)
 
@@ -396,14 +422,36 @@ class transferFinder:
         Returns
         Irec (float): The recorded Irec value in Amperes.
         """
-        value = self.nanonis_module.Sig.MeasSig(sig_names = "Current (A)", averaging_time=self.integration_time) # returns dictionary with signal names as keys and measured values as values
+        readout = self.nanonis_module.Sig.MeasSig(sig_names = ["Current (A)"], averaging_time=self.integration_time) # returns dictionary with signal names as keys and measured values as values
         
         # if current not in the returned dictionary, raise error
-        if "Current (A)" not in value:
+        if "Current (A)" not in readout:
             raise ValueError("Current (A) not found in the measured signals. Check if the channel name is correct and if the signal is properly configured in Nanonis.")
         
-        return value["Current (A)"]
+        return readout["Current (A)"]
 
+    # record Irec at reference amplitude and frequency
+    def record_reference_irec(self):
+        """
+        Function to record the Irec value at the reference amplitude and frequency. 
+        This value isused as a reference for the tuning process.
+        """
+        try:
+            # configure AWG to output the reference signal
+            self.awg.configure_continuous_sine_wave(frequency=self.reference_frequency, 
+                                                    granularity_frequency=self.granularity_frequency,
+                                                    lockin_frequency=self.lockin_frequency, 
+                                                    starting_amplitude=self.reference_amplitude)
+            # activate the output of the AWG and measure at reference amplitude
+            self.awg.start_playing()
+            time.sleep(self.awg_settling_time)
+            self.reference_i_rec = self.get_irec()
+            self.awg.stop_playing()
+            
+        except Exception as e:
+            print(f"Error while recording reference Irec value: {e}. Executing escape routine.")
+            self.escape_routine()
+            
     # record Irec vs the reference amplitudes
         """ def record_irec_for_references(self):
         
@@ -440,7 +488,7 @@ class transferFinder:
    
     # function to tune awg amplitude for a specific frequency to match reference irec
     def tune_awg_amplitude_for_frequency(self, frequency, starting_amplitude = 0.1,
-                                         tolerance=0.01, max_iterations=100):
+                                         tolerance=0.01, max_iterations=2):
         """
         Function to tune the AWG amplitude for a specific frequency to match the reference Irec value (self.reference_i_rec). 
         The function iteratively adjusts the amplitude until the recorded Irec value is within the specified tolerance of the reference Irec.
@@ -457,6 +505,7 @@ class transferFinder:
             # TODO: Find proper starting and reference amplitude for the tuning process.
             # configure AWG to output the reference signal
             self.awg.configure_continuous_sine_wave(frequency=frequency,
+                                                    granularity_frequency=self.granularity_frequency,
                                                     lockin_frequency=self.lockin_frequency,
                                                     starting_amplitude=starting_amplitude,
                                                 )
@@ -478,11 +527,10 @@ class transferFinder:
             while ((i_rec > upper_bound_irec or i_rec < lower_bound_irec) 
                     and iteration < max_iterations):
                 
-                self.tuning_controller.update(I_ref=self.reference_i_rec, I_meas=i_rec)
-                tuned_amplitude = self.tuning_controller.V_out
+                tuned_amplitude = self.tuning_controller.update(I_ref=self.reference_i_rec, I_meas=i_rec)
                 
                 self.awg.update_continuous_sine_wave_amplitude(new_amplitude=tuned_amplitude)
-                time.sleep(self.integration_time)
+                time.sleep(self.awg_settling_time)
                 i_rec = self.get_irec()
                 iteration += 1
                 
@@ -511,7 +559,7 @@ class transferFinder:
             return tuned_amplitude
     
         except Exception as e:
-            print(f"Error while tuning AWG amplitude for frequency {frequency} Hz: {e}. Executing escape routine.")
+            print(f"Error while tuning AWG amplitude for frequency {frequency} Hz: {e} in line {e.__traceback__.tb_lineno}. Executing escape routine.")
             self.escape_routine()
 
     
@@ -524,14 +572,15 @@ class transferFinder:
             - frequency (float): The frequency for which to estimate the starting amplitude.
             - mode (str): The strategy to use for the estimation. 
                 Options are:
-                - "known": 
+                - "known": use the known transfer function value for the desired frequency
                 - "closest": use the recorded Irec values for the reference amplitudes to find the reference frequency that is closest to the desired frequency, and perform a linear interpolation to estimate the Irec value at the desired frequency, then find the corresponding amplitude.
                 - "half": assume 0.5 transmission 
                 - "fixed": use a fixed value for the starting amplitude, currently 0.2 V
                 - idea: 50% transmission -> problem: what is the desired amplitude at the output of the channel?
         """
-        if mode not in ["known", "closest", 
-                        #"half", 
+        if mode not in ["known", 
+                        "closest", 
+                        "half", 
                         "fixed"]:
             raise ValueError(f"Invalid mode for estimating starting amplitude: {mode}. Valid options are 'known', 'closest', 'half', 'fixed'.")
         
@@ -563,6 +612,8 @@ class transferFinder:
         if mode == "fixed":
             starting_amplitude = 0.2 # fixed value for testing, TODO: find better parameter for this
 
+        if mode == "half":
+            starting_amplitude = self.reference_STM_amplitude * 2 # assume 50% transmission
         print(f"Estimated starting amplitude for frequency {frequency} Hz: {starting_amplitude} V using mode {mode}")
 
         return starting_amplitude
@@ -688,6 +739,7 @@ class transferFinder:
 
 
     # helper function to dump a dictionary to a json file
+    # CAUTION: Shall not be used, replaced by json_dump of individual dictionaries
     def dump_dict_to_json(self, file, dict_data,  dict_name = None):
         
         if dict_name:
@@ -712,14 +764,16 @@ class transferFinder:
         current_time = time.strftime("%Y-%m-%d_%H-%M-%S")
         filename = f"{self.session_path}/{self.filename}_{current_time}.json"
 
-        print(f"Saving data to {filename}...")
-        print("Data headers:")
-        print(self.recorded_data_headers)   
+        #print(f"Saving data to {filename}...")
+        #print("Data headers:")
+        #print(self.recorded_data_headers)   
 
-        print("Data to be saved:")
-        print(self.recorded_data_values)
+        #print("Data to be saved:")
+        #print(self.recorded_data_values)
 
-        preliminaries = {
+        
+        # merge all dictionaries into one for easier dumping
+        data_to_dump = {
             "type": "dummy_data",
             "version": self.version,
             "header": f"{self.header}",
@@ -727,21 +781,17 @@ class transferFinder:
             "end_time": f"{current_time}",
         }
 
+        data_to_dump["nanonis_settings"] = self.nanonis_settings
+        data_to_dump["nanonis_parameters"] = self.nanonis_parameters
+        data_to_dump["awg_settings"] = self.awg_settings
+        data_to_dump["tuning_settings"] = self.tuning_settings
+
         # TODO: also save settings
         with open(filename, 'w') as f:
-            
-            f.write("{\n") # start of json file
 
-            # preliminaries
-            self.dump_dict_to_json(file=f, dict_data=preliminaries)
-
-            # nanonis settings
-            self.dump_dict_to_json(file=f, dict_data=self.nanonis_settings, dict_name="nanonis_settings")
-            # nanonis parameters
-            self.dump_dict_to_json(file=f, dict_data=self.nanonis_parameters, dict_name="nanonis_parameters")
   
-            # awg settings
-            self.dump_dict_to_json(file=f, dict_data=self.awg_settings, dict_name="awg_settings")
+
+            f.write(json.dumps(data_to_dump, indent=4)[:-1]+",\n") # remove the last closing curly brace to add the data
 
             # data section
             f.write('"data": {\n')

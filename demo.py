@@ -46,8 +46,7 @@ tf_finder = transferFinder(
     reference_frequency=1e4,
     awg_reference=awg01,
     data_channels=[
-        ("Input 2 (V)", "Lockin"),
-        ("Input 3 (V)", "Dummy2"), 
+        "Input 2 (V)"
     ],
     measurement_voltage=0.5,
 )
@@ -56,12 +55,10 @@ logger.info("Starting transfer function optimization...")
 
 # prepare the system for transfer function measurement
 tf_finder.prepare_measurement()
-
 logger.info("Preparation complete.")
 
-# record Irec for references
-tf_finder.record_irec_for_references()
-
+# measure reference signal
+tf_finder.record_reference_irec()
 logger.info("Reference recording complete.")
 
 # measure transfer function
@@ -75,10 +72,5 @@ if not os.path.exists(folder_path):
     os.makedirs(folder_path)
 tf_finder.save_data()
 
-# plot the reference Irec values for the reference amplitudes
-iref_folder = "irec_reference_values"
-if not os.path.exists(iref_folder):
-    os.makedirs(iref_folder)
-tf_finder.save_reference_irec_values()
-tf_finder.plot_reference_irec_values()
+
 logger.info("Transfer function measurement complete.")
