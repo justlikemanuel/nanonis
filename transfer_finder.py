@@ -42,6 +42,8 @@ class transferFinder:
                 irec_tolerance = 0.1e-13,
                 header = "dummy header",
                 filename = "transfer_function_measurement",
+                communication_time = 1e-4, # TODO: find value!
+                slew_rate = 0.1, # V/s, TODO: find value!
                  ):
         
         """
@@ -76,13 +78,15 @@ class transferFinder:
             - irec_tolerance: The tolerance for the Irec value when comparing to the reference Irec value for the compensation amplitude tuning.
             - filename: The name of the file to save the data to.
             - header: The header to save in the data file, e.g. a description of the experiment and the settings used.
+            - communication_time: The time to wait after each communication with the Nanonis system, to ensure that the system has time to process the command and update the values. This can help to prevent errors due to too fast communication. TODO: find value!
+            - slew_rate: The maximum slew rate to use for the voltage changes, to protect the tip and sample. This can be used in the ramping functions to ensure that the voltage is changed in a way that does not exceed this slew rate.       
         """
 
         
         # dummy parameters (TODO: should be used with the constructor)
         self.height_averaging_period_s = 0.5 # time to wait for the height to stabilize after switching off the z-controller, before recording the Irec value for the transfer function measurement
         self.max_allowed_amplitude = 1 # maximum allowed amplitude in Volts to protect the sample and tip, TODO: find better parameter for this, maybe based on the recorded Irec values for the reference amplitudes
-        
+        self.communication_time = communication_time # time to wait after each communication with the Nanonis system, to ensure that the system has time to process the command and update the values. This can help to prevent errors due to too fast communication. TODO: find value!
         
         # AWG parameters
         self.awg = awg_reference
@@ -242,7 +246,7 @@ class transferFinder:
     ###################################################
 
     # function to (safely) maneeuver to a desired state
-    def maneeuver_to_state(self):
+    def maneeuver_to_state(self, desired_voltage, desired_current):
         """
         
         Method 
@@ -251,58 +255,95 @@ class transferFinder:
         """
 
         # check if z-controller is on
-        if self.nanonis_module.ZCtl.OnOffGet()==1:
-            # case Z-controller is ON
-            if self.check_polarity():
-                # case polarity matches -> ensure current is set correctly
-                self.nanonis_module.ZCtl.SetpntSet(self.current_desired_current)
-
-                #### END OF PATH ####
-
-            else:
-                # case polarity does NOT match
-                pass
-
+        if self.nanonis_module.ZCtl.OnOffGet()==1 and self.check_bias_polarity(desired_voltage):
+            # Z-controller is ON and polarity matches
+            self.nanonis_module.ZCtl.SetpntSet(desired_current)
         else:
-            # case Z-controller is OFF
+            # case Z-controller is OFF and/or polarity does not match
+            self.handle_left_branch(desired_voltage, desired_current)
 
 
-            # check polarity
-            if not self.check_polarity():
-                # case polarity does NOT match
-
-                # set voltage to 0
-                self.nanonis_module.Bias.Set(0)
-            
-            # ramp to I_set
-
-            #
+        self.direct_ramp()
 
         # set target current
         self.nanonis_module.ZCtl.SetpntSet(self.current_desired_current)
 
+    def handle_left_branch(self, desired_voltage, desired_current):
+        
+        if not self.check_bias_polarity(desired_voltage):
+            self.bias_to_zero()
+
+        # ensure current is set to desired current and tune voltage
+        self.nanonis_module.ZCtl.SetpntSet(desired_current)
+        self.tune_voltage_to_current_setpoint(desired_current)
+
+        self.nanonis_module.ZCtl.OnOffSet(1) # turn on z-controller
+
+
+
+    # helper function to iteratively set the bias to 0
+    def bias_to_zero(self, time = 10e-3):
+        """
+        Function that tunes the bias iteratively to 0
+        Args:
+            - the total duration of the function
+
+        Returns:
+            - 0 up on completion
+        """
+        current_voltage = self.nanonis_module.Bias.Get()
+        num_steps = int(np.ceil(current_voltage / (self.slew_rate * time)))
+        time_per_step = time / num_steps
+       
+        step_voltage = current_voltage / num_steps
+
+        for _ in range(num_steps):
+            current_voltage += step_voltage
+            new_voltage = current_voltage - step_voltage
+            self.nanonis_module.Bias.Set(new_voltage)
+
+            # TODO: find better strategy for waiting time
+            if (time_per_step > self.communication_time):
+                time.sleep(time_per_step - self.communication_time)
+
+
+    # helper function to achieve a desired current while controler is off
+    def ramp_to_current(self, desired_current, desired_voltage):
+        """
+        Function to achieve a desired current setpoint while the z-controller is off, by iteratively adjusting the bias voltage and measuring the current until the desired current is reached within a specified tolerance.
+
+        Args:
+            - desired_current: The desired current setpoint in Amperes.
+            - desired_voltage: The desired voltage setpoint in Volts.
+
+        Returns:
+            - 0 up on completion.
+        """
+
+        # check polarity and set voltage to 0 if polarity does not match
+        if not self.check_bias_polarity(desired_voltage):
+            self.nanonis_module.Bias.Set(0)
+
+        # iteratively adjust voltage until achieve current is above the desired current setpoint
+        # TODO: find integration time
+        voltage_step = self.slew_rate * self.communication_time
+        integration_time = self.communication_time # TODO: find better integration value
+        while self.get_irec(integration_time) < desired_current:
+            
+            new_voltage = self.nanonis_module.Bias.Get() + voltage_step # TODO: find better strategy for voltage adjustment
+            self.nanonis_module.Bias.Set(new_voltage)
 
     # helper function to check polarity of measured and desired voltage
-    def check_polarity(self):
+    def check_bias_polarity(self, desired_voltage):
         measured_voltage = self.nanonis_module.Bias.Get()
         polarity_measured = np.sign(measured_voltage)
-        polarity_desired = np.sign(self.measurement_voltage)
+        polarity_desired = np.sign(desired_voltage)
 
         if polarity_measured != polarity_desired:
             return False
         else:
             return True
         
-    # helper function to check if current I is larger or smaller than desired current
-    def check_current_direction(self):
-        measured_current = self.nanonis_module.ZCtl.SetpntGet()
-        current_direction_measured = np.sign(measured_current)
-        current_direction_desired = np.sign(self.current_desired_current)
-
-        if current_direction_measured != current_direction_desired:
-            return False
-        else:
-            return True
     
     # helper function to tune the voltage to a desired current setpoint
     def tune_voltage_to_current_setpoint(self, current_setpoint_A):
@@ -522,14 +563,16 @@ class transferFinder:
         return self.nanonis_module.Util.SessionPathGet()
 
     # function to get the current Irec value
-    def get_irec(self):
+    def get_irec(self, integration_time = None):
         """
         Function to get the current Irec value.
 
         Returns
         Irec (float): The recorded Irec value in Amperes.
         """
-        readout = self.nanonis_module.Sig.MeasSig(sig_names = ["Current (A)"], averaging_time=self.integration_time) # returns dictionary with signal names as keys and measured values as values
+        if integration_time is not None:
+            self.integration_time = integration_time
+        readout = self.nanonis_module.Sig.MeasSig(sig_names = ["Current (A)"], averaging_time=integration_time) # returns dictionary with signal names as keys and measured values as values
         
         # if current not in the returned dictionary, raise error
         if "Current (A)" not in readout:
@@ -661,7 +704,7 @@ class transferFinder:
             self.awg.stop_playing()
 
             # log the result
-            print(f"Tuned amplitude for frequency {frequency} Hz: {tuned_amplitude} V, recorded Irec: {self.get_irec()} A, iterations: {iteration}")
+            print(f"Tuned amplitude for frequency {frequency} Hz: {tuned_amplitude} V")
             
             return tuned_amplitude
     
@@ -897,6 +940,7 @@ class transferFinder:
         data_to_dump["nanonis_pre_settings"] = self.nanonis_parameters
         data_to_dump["awg_settings"] = self.awg_settings
         data_to_dump["tuning_settings"] = self.tuning_settings
+        data_to_dump["reference_i_rec"] = self.reference_i_rec
 
         # TODO: also save settings
         with open(filename, 'w') as f:
