@@ -15,9 +15,10 @@ logger = logging.getLogger("transfer_finder")
 
 class transferFinder:
     def __init__(self, nanonis_module,
-                 get_nanonis_settings = False,
+                 open_nanonis_settings_gui = False,
                 integration_time = 0.1,
                 amplitude_guess_mode = "closest",
+                old_measurement_file = None,
                 old_compensation_amplitudes = None,
                 atom_tracking_settings = None,
                 atom_tracking_time = 0.4,
@@ -33,8 +34,8 @@ class transferFinder:
                 reference_frequency = None,
                 reference_STM_amplitude = 0.5,
                 reference_transmission = 0.5,
-                max_sweep_amplitude = 0.5,
-                num_sweep_amplitudes = 5,
+                #max_sweep_amplitude = 0.5,
+                #num_sweep_amplitudes = 5,
                 data_channels = None,
                 use_active_state = False,
                 measurement_voltage = 0.5,
@@ -48,10 +49,11 @@ class transferFinder:
 
         Args:
             - nanonis_module: The NanonisModules object to interact with the Nanonis system.
-            - get_nanonis_settings: Flag which opens the parameter selection GUI if true.
+            - open_nanonis_settings_gui: Flag which opens the parameter selection GUI if true.
             - integration_time: The integration time to use for recording the Irec value.
             - amplitude_guess_mode: The strategy to use for estimating the starting amplitude for the tuning process. Options are "known" and "half". "known" uses the recorded Irec values for the reference amplitudes to find the two reference frequencies that are closest to the desired frequency, and performs a linear interpolation to estimate the Irec value at the desired frequency, then finds the corresponding amplitude. "half" assumes 0.5 transmission to estimate the starting amplitude.
             - old compensation_amplitudes (list of tuples): The list of previously evaluated frequencies and their corresponding compensation amplitudes.
+            - old_measurement_file (str): The path to the old measurement file from which to read parameters.
             - atom_tracking_settings: Dictionary containing the settings to use for atom tracking, e.g. a dictionary of parameters.
             - atom_tracking_time: The time to track the atom for after each measurement step.
             - atom_tracking_interval: The inerval after how many measurement steps should be executed again.
@@ -124,25 +126,26 @@ class transferFinder:
 
         # Sweep parameters:
         self.sweep_frequencies = sweep_frequencies
-        self.max_sweep_amplitude = max_sweep_amplitude
-        self.num_amplitudes = num_sweep_amplitudes
+        #self.max_sweep_amplitude = max_sweep_amplitude
+        #self.num_amplitudes = num_sweep_amplitudes
+        #self.irec_vs_sweep_amplitudes = []
 
         # generate reference amplitudes
-        step = self.max_sweep_amplitude / self.num_amplitudes
-        self.sweep_amplitudes = [step * (i+1) for i in range(self.num_amplitudes)]
-        logger.info(f"Generated reference amplitudes: {self.sweep_amplitudes} V")
+        #step = self.max_sweep_amplitude / self.num_amplitudes
+        #self.sweep_amplitudes = [step * (i+1) for i in range(self.num_amplitudes)]
+        #logger.info(f"Generated reference amplitudes: {self.sweep_amplitudes} V")
 
         self.measurement_voltage = measurement_voltage
         self.reference_transmission = reference_transmission
         self.reference_STM_amplitude = reference_STM_amplitude
-        self.reference_amplitude = self.reference_STM_amplitude / self.reference_transmissionself.reference_frequency = reference_frequency
+        self.reference_amplitude = self.reference_STM_amplitude / self.reference_transmission
+        self.reference_frequency = reference_frequency
         self.old_compensation_amplitudes = old_compensation_amplitudes
     
    
         # atom tracking
         self.atom_tracking_settings = atom_tracking_settings
-        # apply the settings to the atom tracking module
-        self.nanonis_module.ATrack.PropsSet(**self.atom_tracking_settings)
+        self.nanonis_module.ATrack.PropsSet(**self.atom_tracking_settings) # apply the settings to the atom tracking module
         self.atom_tracking_time = atom_tracking_time
         self.atom_tracking_interval = atom_tracking_interval
 
@@ -152,7 +155,6 @@ class transferFinder:
         self.filename = filename
         self.version = [0, 0, 1]
         self.header = header
-        self.irec_vs_sweep_amplitudes = []
 
         self.recorded_data_headers = [
             "frequency (Hz)",
@@ -167,7 +169,11 @@ class transferFinder:
         self.amplitude_guess_mode = amplitude_guess_mode
         self.reference_i_rec = None # current value at the reference amplitude
 
+        # keep track of current desired paramters for the escape routine
+        self.current_desired_voltage = self.initial_voltage
+        self.current_desired_current = self.initial_current_A
 
+        ################# For Logging ##################
         # store all parameters in a dictionary for logging
         self.nanonis_settings = {
                     "integration_time": integration_time,
@@ -196,8 +202,8 @@ class transferFinder:
                     "reference_frequency": reference_frequency,
                     "reference_STM_amplitude": reference_STM_amplitude,
                     "refererence_transmission": reference_transmission,
-                    "max_sweep_amplitude": max_sweep_amplitude,
-                    "num_sweep_amplitudes": num_sweep_amplitudes,
+                    #"max_sweep_amplitude": max_sweep_amplitude,
+                    #"num_sweep_amplitudes": num_sweep_amplitudes,
                 }
         
         self.tuning_settings = {
@@ -211,7 +217,7 @@ class transferFinder:
         
         # get the nanonis parameters (to put into the logged file)
         meas = MeasurementBase(self.nanonis_module)
-        #self.nanonis_parameters = meas.nanonisSettingsGet(get_nanonis_settings)
+        #self.nanonis_parameters = meas.nanonisSettingsGet(open_nanonis_settings_gui)
         self.nanonis_parameters = {"Dummy_parameter": 0} # the nanonis function above just broke...
 
 
@@ -234,7 +240,108 @@ class transferFinder:
     ###################################################
     ############## Positioning functions ##############
     ###################################################
- 
+
+    # function to (safely) maneeuver to a desired state
+    def maneeuver_to_state(self):
+        """
+        
+        Method 
+
+        
+        """
+
+        # check if z-controller is on
+        if self.nanonis_module.ZCtl.OnOffGet()==1:
+            # case Z-controller is ON
+            if self.check_polarity():
+                # case polarity matches -> ensure current is set correctly
+                self.nanonis_module.ZCtl.SetpntSet(self.current_desired_current)
+
+                #### END OF PATH ####
+
+            else:
+                # case polarity does NOT match
+                pass
+
+        else:
+            # case Z-controller is OFF
+
+
+            # check polarity
+            if not self.check_polarity():
+                # case polarity does NOT match
+
+                # set voltage to 0
+                self.nanonis_module.Bias.Set(0)
+            
+            # ramp to I_set
+
+            #
+
+        # set target current
+        self.nanonis_module.ZCtl.SetpntSet(self.current_desired_current)
+
+
+    # helper function to check polarity of measured and desired voltage
+    def check_polarity(self):
+        measured_voltage = self.nanonis_module.Bias.Get()
+        polarity_measured = np.sign(measured_voltage)
+        polarity_desired = np.sign(self.measurement_voltage)
+
+        if polarity_measured != polarity_desired:
+            return False
+        else:
+            return True
+        
+    # helper function to check if current I is larger or smaller than desired current
+    def check_current_direction(self):
+        measured_current = self.nanonis_module.ZCtl.SetpntGet()
+        current_direction_measured = np.sign(measured_current)
+        current_direction_desired = np.sign(self.current_desired_current)
+
+        if current_direction_measured != current_direction_desired:
+            return False
+        else:
+            return True
+    
+    # helper function to tune the voltage to a desired current setpoint
+    def tune_voltage_to_current_setpoint(self, current_setpoint_A):
+        """
+        Function to tune the bias voltage to reach a desired current setpoint using a PI controller.
+
+        Args:
+            - current_setpoint_A: The desired current setpoint in Amperes.
+        """
+        # check current and desired current
+        measured_current = self.nanonis_module.ZCtl.SetpntGet()
+        self.nanonis_module.B
+    
+    # helper function to tune the voltage after the desired current has been reached
+    # NOTE: z-controller is on at this point
+    def direct_ramp(self):
+        """
+        Ramps the voltage to the desired voltage
+        """
+
+        # compute difference between current voltage and desired voltage
+        diff_voltage = self.current_desired_voltage - self.nanonis_module.Bias.Get()
+
+        num_steps = 10 # TODO: consider change rate
+        step_voltage = diff_voltage / num_steps
+        new_voltage = self.nanonis_module.Bias.Get()
+
+        for _ in range(num_steps):
+            new_voltage = new_voltage + step_voltage
+            self.nanonis_module.Bias.Set(new_voltage)
+            time.sleep(0.1) # TODO: consider change rate
+
+    # helper function to measure the difference between the current voltage and the desired voltage
+    def measure_voltage_difference(self):
+        measured_voltage = self.nanonis_module.Bias.Get()
+        diff_voltage = measured_voltage - self.current_desired_voltage
+
+        return diff_voltage
+    
     # return to default state
     def return_to_starting_state(self):
 
@@ -587,6 +694,10 @@ class transferFinder:
         starting_amplitude = 0
         if mode == "known":
             # could be modified to not only use the same but a close old frequency
+
+            # check if the array exists
+            if self.old_compensation_amplitudes is None:
+                raise ValueError("No old compensation amplitudes provided for 'known' mode. Please provide a list of previously evaluated frequencies and their corresponding compensation amplitudes.")
             # check if frequency is within the old transfer function range (1.st column)
             old_frequencies = self.old_compensation_amplitudes[:, 0]
             old_amplitudes = self.old_compensation_amplitudes[:, 1]
@@ -614,6 +725,7 @@ class transferFinder:
 
         if mode == "half":
             starting_amplitude = self.reference_STM_amplitude * 2 # assume 50% transmission
+            
         print(f"Estimated starting amplitude for frequency {frequency} Hz: {starting_amplitude} V using mode {mode}")
 
         return starting_amplitude
@@ -682,7 +794,7 @@ class transferFinder:
             print(f"Error while measuring transfer function for all frequencies: {e}. Executing escape routine.")
             self.escape_routine()
 
-    # function to save the reference Irec values for the reference amplitudes
+    """# function to save the reference Irec values for the reference amplitudes
     def save_reference_irec_values(self):
         # save the recorded Irec values for the reference amplitudes as a json file
         filename = f"{self.session_path}/reference_irec_values_{self.reference_frequency}Hz_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
@@ -757,7 +869,7 @@ class transferFinder:
         else:
             for key, value in dict_data.items():
                 file.write(f'"{key}": {json.dumps(value)},\n')
-
+"""
     # function to save the recorded data
     def save_data(self):
         # get current date and time
@@ -781,8 +893,8 @@ class transferFinder:
             "end_time": f"{current_time}",
         }
 
-        data_to_dump["nanonis_settings"] = self.nanonis_settings
-        data_to_dump["nanonis_parameters"] = self.nanonis_parameters
+        data_to_dump["nanonis_measurement_settings"] = self.nanonis_settings
+        data_to_dump["nanonis_pre_settings"] = self.nanonis_parameters
         data_to_dump["awg_settings"] = self.awg_settings
         data_to_dump["tuning_settings"] = self.tuning_settings
 
@@ -822,3 +934,26 @@ class transferFinder:
         logger.info(f"Data saved to {filename}.")
 
         return 0
+    
+
+    # function to read all parameters from an old logging file
+    def read_parameters_from_old_measurement(self, filepath):
+        """
+        Function to read all parameters from an old logging file. This can be used to read the settings and parameters from a previous measurement and use them for the current measurement, e.g. for the tuning process or for the estimation of the starting amplitude for the tuning process.
+        Args:
+            - filepath (str): The path to the old logging file.
+        Returns:
+            - parameters (dict): A dictionary containing all the parameters read from the old logging file.
+        """
+
+        with open(filepath, "r") as f:
+            data = json.load(f)
+
+        parameters = {
+            "nanonis_measurement_settings": data.get("nanonis_measurement_settings", {}),
+            "nanonis_pre_settings": data.get("nanonis_pre_settings", {}),
+            "awg_settings": data.get("awg_settings", {}),
+            "tuning_settings": data.get("tuning_settings", {}),
+        }
+
+        return parameters
