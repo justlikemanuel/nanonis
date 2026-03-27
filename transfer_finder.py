@@ -254,59 +254,83 @@ class transferFinder:
     def maneeuver_to_state(self, desired_voltage, desired_current):
         """
         Method to achieve a state given by a desired voltage and desired current.
+
+        Args:
+            - desired_voltage: The desired bias voltage in Volts.
+            - desired_current: The desired current setpoint in Amperes.
+
         
         """
+        try:
+            # check if z-controller is on
+            if self.nanonis_module.ZCtl.OnOffGet()==1:
+                # Z-controller is ON
 
-        # check if z-controller is on
-        if self.nanonis_module.ZCtl.OnOffGet()==1:
-            # Z-controller is ON
+                if self.check_bias_polarity(desired_voltage):
 
-            if self.check_bias_polarity(desired_voltage):
+                    #polarity matches
+                    # TODO: Think about "current" (aktueller) vs "current" (Strom) -> better naming :/
+                    current_setpoint = self.nanonis_module.ZCtl.SetpntGet()
 
-                #polarity matches
-                current_setpoint = self.nanonis_module.ZCtl.SetpntGet()
-
-                if current_setpoint < desired_current:
-                    self.nanonis_module.ZCtl.SetpntSet(desired_current)
+                    if current_setpoint < desired_current:
+                        self.nanonis_module.ZCtl.SetpntSet(desired_current)
+                else:
+                    # polarity does not match, turn off z-controller and ramp to desired current
+                    self.turn_off_z_controller_and_wait()
+                    self.ramp_current_z_off(desired_voltage, desired_current)        
             else:
-                # polarity does not match, turn off z-controller and ramp to desired current
-                self.nanonis_module.ZCtl.OnOffSet(0) # turn off z-controller
-                self.handle_left_branch(desired_voltage, desired_current)        
-        else:
-            # case Z-controller is OFF and/or polarity does not match
-            self.handle_left_branch(desired_voltage, desired_current)
+                # case Z-controller is OFF and/or polarity does not match
+                self.ramp_current_z_off(desired_voltage, desired_current)
 
+            self.ramp_bias(desired_voltage)
 
+            # set target current
+            self.nanonis_module.ZCtl.SetpntSet(self.current_desired_current)
 
-        self.direct_ramp(desired_voltage)
-
-        # set target current
-        self.nanonis_module.ZCtl.SetpntSet(self.current_desired_current)
-
-    def handle_left_branch(self, desired_voltage, desired_current):
+            return 0
         
-        if not self.check_bias_polarity(desired_voltage):
-            self.bias_to_zero()
+        except Exception as e:
+            print(f"Error while maneeuvering to state with voltage {desired_voltage} V and current {desired_current} A: {e}. Executing escape routine.")
+            self.escape_routine()
 
-        # ensure current is set to desired current and tune voltage
-        self.nanonis_module.ZCtl.SetpntSet(desired_current)
-        self.tune_voltage_to_current_setpoint(desired_current)
+    def ramp_current_z_off(self, desired_voltage, desired_current):
+        
+        """
+        Function to handle the case when the z-controller is off.
+        First, the voltage is ramped to achieve the current. 
+        Then, the z-controller is re-activated.
 
-        self.nanonis_module.ZCtl.OnOffSet(1) # turn on z-controller
+        Args:
+            - desired_voltage: The desired bias voltage in Volts.
+            - desired_current: The desired current setpoint in Amperes.
+        """
 
+        try:
+            if not self.check_bias_polarity(desired_voltage):
+                self.bias_to_zero()
+
+            # ensure current is set to desired current and tune voltage
+            self.nanonis_module.ZCtl.SetpntSet(desired_current)
+            self.tune_voltage_to_current_setpoint(desired_current)
+
+            self.nanonis_module.ZCtl.OnOffSet(1) # turn on z-controller
+
+            return 0
+        
+        except Exception as e:
+            print(f"Error while handling left branch: {e}. Executing escape routine.")
+            self.escape_routine()
 
 
     # helper function to iteratively set the bias to a desired voltage
-    def change_bias_slowly(self, new_voltage, total_time = 0.05):
+    def ramp_bias(self, new_voltage, total_time = 0.05):
         """
         Function that tunes the bias iteratively to a desired voltage
         Args:
             - new_voltage: The desired voltage setpoint in Volts.
             - time: The total duration of the function in seconds.
-        Returns:
-            - 0 up on completion
+
         """
-        # TODO: what if time is beyond slew rate
         current_voltage = self.nanonis_module.Bias.Get()
         diff_voltage = new_voltage - current_voltage
 
@@ -314,21 +338,26 @@ class transferFinder:
         time_from_slew_rate = abs(diff_voltage) / self.slew_rate
         total_time = max(total_time, time_from_slew_rate)
 
-        num_steps = int(np.ceil(diff_voltage / (self.slew_rate * total_time)))
-        time_per_step = total_time / num_steps
-       
+        # compute voltage increment
+        num_steps = int(np.ceil(diff_voltage / (self.slew_rate * total_time)))       
         step_voltage = diff_voltage / num_steps
+        time_per_step = total_time / num_steps
+        additional_waiting_time = time_per_step - self.communication_time
 
-        for _ in range(num_steps):
-            current_voltage += step_voltage
-            new_voltage = current_voltage - step_voltage
-            self.nanonis_module.Bias.Set(new_voltage)
+        try:
+            for _ in range(num_steps):
+                current_voltage += step_voltage
+                new_voltage = current_voltage - step_voltage
+                self.nanonis_module.Bias.Set(new_voltage)
 
-            # TODO: find better strategy for waiting time
-            missing_waiting_time = time_per_step - self.communication_time
-            if (missing_waiting_time > 0):
-                time.sleep(missing_waiting_time)
+                if (additional_waiting_time > 0):
+                    time.sleep(additional_waiting_time)
 
+            return 0
+        
+        except Exception as e:
+            print(f"Error while ramping bias: {e}. Executing escape routine.")
+            self.escape_routine()
 
     # helper function to achieve a desired current while controler is off
     def ramp_to_current(self, desired_current, desired_voltage):
@@ -338,14 +367,11 @@ class transferFinder:
         Args:
             - desired_current: The desired current setpoint in Amperes.
             - desired_voltage: The desired voltage setpoint in Volts.
-
-        Returns:
-            - 0 up on completion.
         """
 
         # check polarity and set voltage to 0 if polarity does not match
         if not self.check_bias_polarity(desired_voltage):
-            self.change_bias_slowly(0, 0.05) # TODO: find better parameters for the time and voltage step in this function
+            self.ramp_bias(0, 0.05) # TODO: find better parameters for the time and voltage step in this function
         # iteratively adjust voltage until achieve current is above the desired current setpoint
         voltage_step = self.slew_rate * self.communication_time
 
@@ -353,6 +379,8 @@ class transferFinder:
             new_voltage = self.nanonis_module.Bias.Get() + voltage_step # TODO: find better strategy for voltage adjustment
             self.nanonis_module.Bias.Set(new_voltage)
 
+        return 0
+    
     # helper function to check polarity of measured and desired voltage
     def check_bias_polarity(self, desired_voltage):
         measured_voltage = self.nanonis_module.Bias.Get()
@@ -382,25 +410,9 @@ class transferFinder:
             set_voltage += voltage_step
             self.nanonis_module.Bias.Set(set_voltage)
 
-    # helper function to tune the voltage after the desired current has been reached
-    # NOTE: z-controller is on at this point
-    def direct_ramp(self, target_voltage):
-        """
-        Ramps the voltage to the desired voltage
-        """
+        return 0
 
-        # compute difference between current voltage and desired voltage
-        diff_voltage = target_voltage - self.nanonis_module.Bias.Get()
-
-        num_steps = 10 # TODO: consider change rate
-        step_voltage = diff_voltage / num_steps
-        new_voltage = self.nanonis_module.Bias.Get()
-
-        for _ in range(num_steps):
-            new_voltage = new_voltage + step_voltage
-            self.nanonis_module.Bias.Set(new_voltage)
-            time.sleep(0.1) # TODO: consider change rate
-
+    
     # helper function to measure the difference between the current voltage and the desired voltage
     def measure_voltage_difference(self, desired_voltage):
         measured_voltage = self.nanonis_module.Bias.Get()
@@ -410,10 +422,20 @@ class transferFinder:
     
     # function to turn off the z-controller and wait for the height to stabilize
     def turn_off_z_controller_and_wait(self):
-        self.nanonis_module.ZCtl.OnOffSet(0) # turn off z-controller
+        """
+        Function to turn off the z-controller and wait for the height to stabilize.
+        """
+        try:
+            self.nanonis_module.ZCtl.OnOffSet(0) # turn off z-controller
         
-        while self.nanonis_module.ZCtl.OnOffGet() == 1:
-            time.sleep(0.01)
+            while self.nanonis_module.ZCtl.OnOffGet() == 1:
+                time.sleep(0.01)
+
+            return 0
+        
+        except Exception as e:
+            print(f"Error while turning off z-controller: {e}. Executing escape routine.")
+            self.escape_routine()
 
     # return to default state
     def return_to_starting_state(self):
@@ -430,12 +452,14 @@ class transferFinder:
             self.nanonis_module.ZCtl.SwitchOffDelaySet(self.initial_z_controler_switch_off_delay_s)
             self.maneeuver_to_state(self.initial_voltage, self.initial_current_A)
 
-            # restore atomic tracking settings
+            # restore atom tracking settings
             self.nanonis_module.ATrack.PropsSet(*self.initial_tracking_settings.values())
+
+            return 0
 
         except Exception as e:
             print(f"Error while returning to starting state: {e}. Executing escape routine.")
-            self.escape_routine()         
+            self.escape_routine()      
  
     # if an error occurs, execute this command
     def escape_routine(self):
@@ -454,7 +478,6 @@ class transferFinder:
         # turn off AWG
         self.awg.stop_playing()
 
-       
         # Method: recursive try
         """
         1. Activate z-controller    
@@ -518,10 +541,11 @@ class transferFinder:
 
             # turn off the z-controller to allow for height averaging
             self.turn_off_z_controller_and_wait()
-            print("Z-controller turned off for height averaging.")
 
             # set measurement voltage
-            self.change_bias_slowly(self.measurement_voltage)
+            self.ramp_bias(self.measurement_voltage)
+
+            return 0
         
         except Exception as e:
             print(f"Error while preparing measurement: {e}. Executing escape routine.")
@@ -548,10 +572,11 @@ class transferFinder:
             # turn modulation and controller off
             self.nanonis_module.ATrack.CtrlSet('Modulation','off')
             
+            return 0
+        
         except Exception as e:
             print(f"Error while tracking atom: {e}. Executing escape routine.")
             self.escape_routine()
-
 
     #####################################################
     ############### Measurement functions ###############
@@ -605,11 +630,13 @@ class transferFinder:
             self.reference_i_rec = self.get_irec(integration_time=self.integration_time)
             self.awg.stop_playing()
             
+            return 0
+            
         except Exception as e:
             print(f"Error while recording reference Irec value: {e}. Executing escape routine.")
             print(f"Error in line {e.__traceback__.tb_lineno}")
             self.escape_routine()
-            
+          
     # record Irec vs the reference amplitudes
         """ def record_irec_for_references(self):
         
@@ -719,7 +746,6 @@ class transferFinder:
         except Exception as e:
             print(f"Error while tuning AWG amplitude for frequency {frequency} Hz: {e} in line {e.__traceback__.tb_lineno}. Executing escape routine.")
             self.escape_routine()
-
     
     # function to estimate the starting amplitude for the tuning process
     def estimate_starting_amplitude_for_frequency(self, frequency, mode):
@@ -997,7 +1023,7 @@ class transferFinder:
         Returns:
             - parameters (dict): A dictionary containing all the parameters read from the old logging file.
         """
-
+        # TODO: Implement missing parameters (the dictionaries are only for reference as of now)
         with open(filepath, "r") as f:
             data = json.load(f)
 
