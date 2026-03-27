@@ -48,7 +48,10 @@ tf_finder = transferFinder(
     data_channels=[
         "Input 2 (V)"
     ],
+    active_state_current=1e-9,
+    active_state_voltage=0.1,
     measurement_voltage=0.5,
+
 )
 
 logger.info("Starting transfer function optimization...")

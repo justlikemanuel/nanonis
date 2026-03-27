@@ -16,6 +16,7 @@ logger = logging.getLogger("transfer_finder")
 class transferFinder:
     def __init__(self, nanonis_module,
                  open_nanonis_settings_gui = False,
+                 height_averaging_time = 0.2,
                 integration_time = 0.1,
                 amplitude_guess_mode = "closest",
                 old_measurement_file = None,
@@ -37,7 +38,8 @@ class transferFinder:
                 #max_sweep_amplitude = 0.5,
                 #num_sweep_amplitudes = 5,
                 data_channels = None,
-                use_active_state = False,
+                active_state_current = None,
+                active_state_voltage = None,
                 measurement_voltage = 0.5,
                 irec_tolerance = 0.1e-13,
                 header = "dummy header",
@@ -52,6 +54,7 @@ class transferFinder:
         Args:
             - nanonis_module: The NanonisModules object to interact with the Nanonis system.
             - open_nanonis_settings_gui: Flag which opens the parameter selection GUI if true.
+            - height_averaging_time: The time to wait for the height to stabilize after switching off the z-controller.
             - integration_time: The integration time to use for recording the Irec value.
             - amplitude_guess_mode: The strategy to use for estimating the starting amplitude for the tuning process. Options are "known" and "half". "known" uses the recorded Irec values for the reference amplitudes to find the two reference frequencies that are closest to the desired frequency, and performs a linear interpolation to estimate the Irec value at the desired frequency, then finds the corresponding amplitude. "half" assumes 0.5 transmission to estimate the starting amplitude.
             - old compensation_amplitudes (list of tuples): The list of previously evaluated frequencies and their corresponding compensation amplitudes.
@@ -81,10 +84,8 @@ class transferFinder:
             - communication_time: The time to wait after each communication with the Nanonis system, to ensure that the system has time to process the command and update the values. This can help to prevent errors due to too fast communication. TODO: find value!
             - slew_rate: The maximum slew rate to use for the voltage changes, to protect the tip and sample. This can be used in the ramping functions to ensure that the voltage is changed in a way that does not exceed this slew rate.       
         """
-
-        
+                
         # dummy parameters (TODO: should be used with the constructor)
-        self.height_averaging_period_s = 0.5 # time to wait for the height to stabilize after switching off the z-controller, before recording the Irec value for the transfer function measurement
         self.max_allowed_amplitude = 1 # maximum allowed amplitude in Volts to protect the sample and tip, TODO: find better parameter for this, maybe based on the recorded Irec values for the reference amplitudes
         self.communication_time = communication_time # time to wait after each communication with the Nanonis system, to ensure that the system has time to process the command and update the values. This can help to prevent errors due to too fast communication. TODO: find value!
         
@@ -102,22 +103,21 @@ class transferFinder:
 
         # nanonis        
         self.nanonis_module = nanonis_module
+        self.height_averaging_time = height_averaging_time
         self.integration_time = integration_time
+        self.current_index = 1 # TODO: find from nanonis
 
-        # get current x_pos, y_pos, voltage and current to be able to return to this state
+        # get current nanonis settings
         x_pos, y_pos = self.nanonis_module.FolMe.XYPosGet(Wait_for_newest_data=True)
         self.initial_x_position_m = x_pos
         self.initial_y_position_m = y_pos
         self.initial_voltage = self.nanonis_module.Bias.Get()
-        self.initial_current_A = self.nanonis_module.ZCtl.SetpntGet()
-        
-        # get current nanonis settings
+        self.initial_current_A = self.nanonis_module.ZCtl.SetpntGet()        
         self.initial_z_controler_switch_off_delay_s = self.nanonis_module.ZCtl.SwitchOffDelayGet() # p_gain, time_constant, i_gain
         gain = self.nanonis_module.ZCtl.GainGet() # p_gain, time_constant, i_gain
         self.initial_z_p_gain = gain[0]
         self.initial_z_time_constant = gain[1]
         self.initial_tracking_settings = self.nanonis_module.ATrack.PropsGet() # Igain, Frequency, Amplitude, Phase, SwitchOffDelay
-
 
         # escape routine
         self.voltage_tolerance = 1e-5
@@ -126,7 +126,7 @@ class transferFinder:
         self.escape_routine_voltage_step = 1e-3 # voltage step to apply in the escape routine
         self.escape_routine_current_step = 1e-12 # current step to apply in the escape routine       
         self.escape_routine_time_constant = 0.5  # time step between the update of the bias voltage
-
+        self.slew_rate = slew_rate # maximum slew rate to use for the voltage changes in the escape routine, to protect the tip and sample
 
         # Sweep parameters:
         self.sweep_frequencies = sweep_frequencies
@@ -149,7 +149,7 @@ class transferFinder:
    
         # atom tracking
         self.atom_tracking_settings = atom_tracking_settings
-        self.nanonis_module.ATrack.PropsSet(**self.atom_tracking_settings) # apply the settings to the atom tracking module
+        self.nanonis_module.ATrack.PropsSet(**self.atom_tracking_settings)
         self.atom_tracking_time = atom_tracking_time
         self.atom_tracking_interval = atom_tracking_interval
 
@@ -159,6 +159,10 @@ class transferFinder:
         self.filename = filename
         self.version = [0, 0, 1]
         self.header = header
+
+        # active state parameters
+        self.active_state_current = active_state_current
+        self.active_state_voltage = active_state_voltage
 
         self.recorded_data_headers = [
             "frequency (Hz)",
@@ -186,7 +190,8 @@ class transferFinder:
                     "atom_tracking_interval": atom_tracking_interval,
                     "data_channels": data_channels,
                     "measurement_voltage": measurement_voltage,
-                    "use_active_state": use_active_state,
+                    "active_state_current": active_state_current,
+                    "active_state_voltage": active_state_voltage,   
                     "initial_x_position_m": self.initial_x_position_m,
                     "initial_y_position_m": self.initial_y_position_m,
                     "initial_bias_voltage": self.initial_voltage,
@@ -205,7 +210,7 @@ class transferFinder:
                     "sweep_frequencies": sweep_frequencies,
                     "reference_frequency": reference_frequency,
                     "reference_STM_amplitude": reference_STM_amplitude,
-                    "refererence_transmission": reference_transmission,
+                    "reference_transmission": reference_transmission,
                     #"max_sweep_amplitude": max_sweep_amplitude,
                     #"num_sweep_amplitudes": num_sweep_amplitudes,
                 }
@@ -248,22 +253,32 @@ class transferFinder:
     # function to (safely) maneeuver to a desired state
     def maneeuver_to_state(self, desired_voltage, desired_current):
         """
-        
-        Method 
-
+        Method to achieve a state given by a desired voltage and desired current.
         
         """
 
         # check if z-controller is on
-        if self.nanonis_module.ZCtl.OnOffGet()==1 and self.check_bias_polarity(desired_voltage):
-            # Z-controller is ON and polarity matches
-            self.nanonis_module.ZCtl.SetpntSet(desired_current)
+        if self.nanonis_module.ZCtl.OnOffGet()==1:
+            # Z-controller is ON
+
+            if self.check_bias_polarity(desired_voltage):
+
+                #polarity matches
+                current_setpoint = self.nanonis_module.ZCtl.SetpntGet()
+
+                if current_setpoint < desired_current:
+                    self.nanonis_module.ZCtl.SetpntSet(desired_current)
+            else:
+                # polarity does not match, turn off z-controller and ramp to desired current
+                self.nanonis_module.ZCtl.OnOffSet(0) # turn off z-controller
+                self.handle_left_branch(desired_voltage, desired_current)        
         else:
             # case Z-controller is OFF and/or polarity does not match
             self.handle_left_branch(desired_voltage, desired_current)
 
 
-        self.direct_ramp()
+
+        self.direct_ramp(desired_voltage)
 
         # set target current
         self.nanonis_module.ZCtl.SetpntSet(self.current_desired_current)
@@ -281,21 +296,28 @@ class transferFinder:
 
 
 
-    # helper function to iteratively set the bias to 0
-    def bias_to_zero(self, time = 10e-3):
+    # helper function to iteratively set the bias to a desired voltage
+    def change_bias_slowly(self, new_voltage, total_time = 0.05):
         """
-        Function that tunes the bias iteratively to 0
+        Function that tunes the bias iteratively to a desired voltage
         Args:
-            - the total duration of the function
-
+            - new_voltage: The desired voltage setpoint in Volts.
+            - time: The total duration of the function in seconds.
         Returns:
             - 0 up on completion
         """
+        # TODO: what if time is beyond slew rate
         current_voltage = self.nanonis_module.Bias.Get()
-        num_steps = int(np.ceil(current_voltage / (self.slew_rate * time)))
-        time_per_step = time / num_steps
+        diff_voltage = new_voltage - current_voltage
+
+        # ensure slew rate is not exceeded
+        time_from_slew_rate = abs(diff_voltage) / self.slew_rate
+        total_time = max(total_time, time_from_slew_rate)
+
+        num_steps = int(np.ceil(diff_voltage / (self.slew_rate * total_time)))
+        time_per_step = total_time / num_steps
        
-        step_voltage = current_voltage / num_steps
+        step_voltage = diff_voltage / num_steps
 
         for _ in range(num_steps):
             current_voltage += step_voltage
@@ -303,8 +325,9 @@ class transferFinder:
             self.nanonis_module.Bias.Set(new_voltage)
 
             # TODO: find better strategy for waiting time
-            if (time_per_step > self.communication_time):
-                time.sleep(time_per_step - self.communication_time)
+            missing_waiting_time = time_per_step - self.communication_time
+            if (missing_waiting_time > 0):
+                time.sleep(missing_waiting_time)
 
 
     # helper function to achieve a desired current while controler is off
@@ -322,14 +345,11 @@ class transferFinder:
 
         # check polarity and set voltage to 0 if polarity does not match
         if not self.check_bias_polarity(desired_voltage):
-            self.nanonis_module.Bias.Set(0)
-
+            self.change_bias_slowly(0, 0.05) # TODO: find better parameters for the time and voltage step in this function
         # iteratively adjust voltage until achieve current is above the desired current setpoint
-        # TODO: find integration time
         voltage_step = self.slew_rate * self.communication_time
-        integration_time = self.communication_time # TODO: find better integration value
-        while self.get_irec(integration_time) < desired_current:
-            
+
+        while self.get_irec() < desired_current:            
             new_voltage = self.nanonis_module.Bias.Get() + voltage_step # TODO: find better strategy for voltage adjustment
             self.nanonis_module.Bias.Set(new_voltage)
 
@@ -346,26 +366,31 @@ class transferFinder:
         
     
     # helper function to tune the voltage to a desired current setpoint
-    def tune_voltage_to_current_setpoint(self, current_setpoint_A):
+    def tune_voltage_to_current_setpoint(self, current_setpoint):
         """
         Function to tune the bias voltage to reach a desired current setpoint using a PI controller.
 
         Args:
-            - current_setpoint_A: The desired current setpoint in Amperes.
+            - current_setpoint: The desired current setpoint in Amperes.
         """
-        # check current and desired current
-        measured_current = self.nanonis_module.ZCtl.SetpntGet()
-        self.nanonis_module.B
-    
+        # find polarity of the desired voltage
+        polarity= np.sign(self.current_desired_voltage)
+        voltage_step = self.slew_rate * self.communication_time * polarity
+        set_voltage = self.nanonis_module.Bias.Get()
+
+        while  (current_setpoint - self.get_irec()) > 0:
+            set_voltage += voltage_step
+            self.nanonis_module.Bias.Set(set_voltage)
+
     # helper function to tune the voltage after the desired current has been reached
     # NOTE: z-controller is on at this point
-    def direct_ramp(self):
+    def direct_ramp(self, target_voltage):
         """
         Ramps the voltage to the desired voltage
         """
 
         # compute difference between current voltage and desired voltage
-        diff_voltage = self.current_desired_voltage - self.nanonis_module.Bias.Get()
+        diff_voltage = target_voltage - self.nanonis_module.Bias.Get()
 
         num_steps = 10 # TODO: consider change rate
         step_voltage = diff_voltage / num_steps
@@ -377,12 +402,19 @@ class transferFinder:
             time.sleep(0.1) # TODO: consider change rate
 
     # helper function to measure the difference between the current voltage and the desired voltage
-    def measure_voltage_difference(self):
+    def measure_voltage_difference(self, desired_voltage):
         measured_voltage = self.nanonis_module.Bias.Get()
-        diff_voltage = measured_voltage - self.current_desired_voltage
+        diff_voltage = measured_voltage - desired_voltage
 
         return diff_voltage
     
+    # function to turn off the z-controller and wait for the height to stabilize
+    def turn_off_z_controller_and_wait(self):
+        self.nanonis_module.ZCtl.OnOffSet(0) # turn off z-controller
+        
+        while self.nanonis_module.ZCtl.OnOffGet() == 1:
+            time.sleep(0.01)
+
     # return to default state
     def return_to_starting_state(self):
 
@@ -393,31 +425,13 @@ class transferFinder:
 
         try:
             # TODO: check with Nicolaj for best sequence of operations
-            # move to xy position
-            wait_end_move = False
-            self.nanonis_module.FolMe.XYPosSet(self.initial_x_position_m, self.initial_y_position_m, wait_end_move)
-
-            # TODO: what is better, set off-delay to 0 and then deactivate, or deactivate immediately and wait for some time? 
-
-            # set off delay to 0
+    
+            # set off delay to initial value
             self.nanonis_module.ZCtl.SwitchOffDelaySet(self.initial_z_controler_switch_off_delay_s)
+            self.maneeuver_to_state(self.initial_voltage, self.initial_current_A)
 
-            # deactivate controller
-            if self.nanonis_module.ZCtl.OnOffGet()==1:
-                self.nanonis_module.ZCtl.OnOffSet(0)
-
-            
-            # TODO: find best waiting time
-
-            # set the bias mode to the desired value
-            self.nanonis_module.Bias.Set(self.initial_voltage)
-            
-            # set the desired current
-            self.nanonis_module.ZCtl.SetpntSet(self.initial_current_A)
-            
-            # TODO: find proper waiting time before and after switching the controller on
-            # activate z-controller
-            self.nanonis_module.ZCtl.OnOffSet(1)    
+            # restore atomic tracking settings
+            self.nanonis_module.ATrack.PropsSet(*self.initial_tracking_settings.values())
 
         except Exception as e:
             print(f"Error while returning to starting state: {e}. Executing escape routine.")
@@ -430,6 +444,9 @@ class transferFinder:
         Sets the z-controller value to its default position and activates the controller.
     
         """
+        ### REMOVE AFTER TESTING!!! ###
+        print("Error occured!")
+        exit(1)
         # TODO: change print statements to logging messages
         print("Error occured!")
         print("Recovering to default state.")
@@ -450,53 +467,17 @@ class transferFinder:
             self.is_in_error_state = True
 
         try:
-            # set parameters on z-controller and activate
-            self.nanonis_module.ZCtl.SwitchOffDelaySet(self.initial_z_controler_switch_off_delay_s)
-            self.nanonis_module.ZCtl.GainSet(self.initial_z_p_gain, self.initial_z_time_constant) # nochmal ausschalten davor?
-            self.nanonis_module.ZCtl.OnOffSet(1)
-
-            # find current voltage value and change to default voltage
-            measured_voltage = self.nanonis_module.Bias.Get()
-
-            diff_voltage = measured_voltage - self.initial_voltage
-
-            # iterate the voltage in the direction of the default voltage until we are back in the pre-measurement state
-            while np.abs(diff_voltage) > self.voltage_tolerance:
-                if abs(diff_voltage) < self.escape_routine_voltage_step:
-                    step_voltage = diff_voltage
-                else:
-                    step_voltage = self.escape_routine_voltage_step * np.sign(diff_voltage)
-
-                new_voltage = measured_voltage - step_voltage
-                self.nanonis_module.Bias.Set(new_voltage)
-                time.sleep(self.escape_routine_time_constant)
-
-                measured_voltage = self.nanonis_module.Bias.Get()
-                diff_voltage = measured_voltage - self.initial_voltage   
-
-            # iterate the current in the direction of the default current until we are back in the pre-measurement state
-            measured_current = self.nanonis_module.ZCtl.SetpntGet()
-            diff_current = measured_current - self.initial_current_A
-
-            while np.abs(diff_current) > self.current_tolerance:
-                if abs(diff_current) < self.escape_routine_current_step:
-                    step_current = diff_current
-                else:
-                    step_current = self.escape_routine_current_step * np.sign(diff_current)
-
-                new_current = measured_current - step_current
-                self.nanonis_module.ZCtl.SetpntSet(new_current)
-                time.sleep(self.escape_routine_time_constant)
-
-                measured_current = self.nanonis_module.ZCtl.SetpntGet()
-                diff_current = measured_current - self.initial_current_A
+            self.maneeuver_to_state(self.initial_voltage, self.initial_current_A)
 
         except Exception as e:
+
+            # debugging ONLY!!!! TODO: Remove this comment
+            exit(1)
             print(f"Error during escape routine: {e}. Retrying...")
             self.escape_routine()
 
         # TODO: what shall happen after recovering?
-        # abspeichern
+        self.save_data()
         exit(1)
 
 
@@ -506,18 +487,41 @@ class transferFinder:
         Function to prepare the measurement.
         """
         try:
-            # TODO: implementation of active state
+            # TODO: verify sequence
         
             if self.atom_tracking_interval < len(self.sweep_frequencies):
-                # run atom tracking
                 print("Starting atom tracking.")
                 self.track_atom()
+                
             # ensure the z_off_delay is set to the desired value
-            self.nanonis_module.ZCtl.SwitchOffDelaySet(self.height_averaging_period_s)
+            self.nanonis_module.ZCtl.SwitchOffDelaySet(self.height_averaging_time)
+            print("Atom tracking finished.")
+
+            # DEBUG ONLY:
+            # move to 2.5 V and 10 pA
+            voltage = 2.5
+            amps = 20e-12
+            self.maneeuver_to_state(voltage, amps)
+
+            print("Moved to 2.5 V and 10 pA for testing purposes. Remove this after testing!!!")
+            time.sleep(5)
+            # move to active state position, if specified
+            if self.active_state_voltage is not None and self.active_state_current is not None:
+                # update current desired parameters for escape routine
+                print(f"Moving to active state given by voltage {self.active_state_voltage} V and current {self.active_state_current} A.")
+                self.current_desired_voltage = self.active_state_voltage
+                self.current_desired_current = self.active_state_current
+                self.maneeuver_to_state(self.active_state_voltage, self.active_state_current)
+
+                print("moved to active state.")
+                time.sleep(10)
 
             # turn off the z-controller to allow for height averaging
-            self.nanonis_module.ZCtl.OnOffSet(0)
+            self.turn_off_z_controller_and_wait()
             print("Z-controller turned off for height averaging.")
+
+            # set measurement voltage
+            self.change_bias_slowly(self.measurement_voltage)
         
         except Exception as e:
             print(f"Error while preparing measurement: {e}. Executing escape routine.")
@@ -570,8 +574,11 @@ class transferFinder:
         Returns
         Irec (float): The recorded Irec value in Amperes.
         """
-        if integration_time is not None:
-            self.integration_time = integration_time
+        
+        # no integration time -> single shot
+        if integration_time is None:
+            return self.nanonis_module.Sig.ValGet(signal_index=self.current_index, wait_for_newest_data=True)
+        
         readout = self.nanonis_module.Sig.MeasSig(sig_names = ["Current (A)"], averaging_time=integration_time) # returns dictionary with signal names as keys and measured values as values
         
         # if current not in the returned dictionary, raise error
@@ -595,11 +602,12 @@ class transferFinder:
             # activate the output of the AWG and measure at reference amplitude
             self.awg.start_playing()
             time.sleep(self.awg_settling_time)
-            self.reference_i_rec = self.get_irec()
+            self.reference_i_rec = self.get_irec(integration_time=self.integration_time)
             self.awg.stop_playing()
             
         except Exception as e:
             print(f"Error while recording reference Irec value: {e}. Executing escape routine.")
+            print(f"Error in line {e.__traceback__.tb_lineno}")
             self.escape_routine()
             
     # record Irec vs the reference amplitudes
@@ -615,14 +623,14 @@ class transferFinder:
             # activate the output of the AWG and measure at reference amplitude
             self.awg.start_playing()
             time.sleep(self.awg_settling_time)
-            self.reference_i_rec = self.get_irec()
+            self.reference_i_rec = self.get_irec(integration_time=self.integration_time)
             print("AWG ON")
 
             for amplitude in self.sweep_amplitudes:
 
                 matched_amplitude = self.awg.update_continuous_sine_wave_amplitude(new_amplitude=amplitude)
                 time.sleep(self.awg_settling_time)
-                irec = self.get_irec()
+                irec = self.get_irec(integration_time=self.integration_time)
 
                 # add data to list
                 self.irec_vs_sweep_amplitudes.append((matched_amplitude, irec))
@@ -672,7 +680,7 @@ class transferFinder:
             upper_bound_irec = self.reference_i_rec * (1 + tolerance)
             lower_bound_irec = self.reference_i_rec * (1 - tolerance)
 
-            i_rec = self.get_irec()
+            i_rec = self.get_irec(integration_time=self.integration_time)
 
             while ((i_rec > upper_bound_irec or i_rec < lower_bound_irec) 
                     and iteration < max_iterations):
@@ -681,7 +689,7 @@ class transferFinder:
                 
                 self.awg.update_continuous_sine_wave_amplitude(new_amplitude=tuned_amplitude)
                 time.sleep(self.awg_settling_time)
-                i_rec = self.get_irec()
+                i_rec = self.get_irec(integration_time=self.integration_time)
                 iteration += 1
                 
                 """                
@@ -689,7 +697,7 @@ class transferFinder:
                 # or linear sweep
                 # CAUTION: too much current rips the sample/tip
                 # Nicolaj mentioned something as the momentum method
-                if self.get_irec() > upper_bound_irec:
+                if self.get_irec(integration_time=self.integration_time) > upper_bound_irec:
                     tuned_amplitude *= 0.9 # decrease amplitude by 10%
                 else:
                     tuned_amplitude *= 1.1 # increase amplitude by 10%

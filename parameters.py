@@ -48,8 +48,8 @@ class GeneralParameters(ParameterList):
             Parameter(version, name="version"),
             Parameter(new_logging_file, name="new_logging_file", use_in_dict=False),
             Parameter(old_logging_file, name="old_logging_file"),
-            Parameter(header, name="header")
-            Parameter()
+            Parameter(header, name="header"),
+            Parameter(old_logging_file, name="old_logging_file")
         ]
         super().__init__(params)
 # AWG parameters
