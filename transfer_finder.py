@@ -291,6 +291,7 @@ class transferFinder:
         
         except Exception as e:
             print(f"Error while maneeuvering to state with voltage {desired_voltage} V and current {desired_current} A: {e}. Executing escape routine.")
+            print(f"Error in line {e.__traceback__.tb_lineno}")
             self.escape_routine()
 
     def ramp_current_z_off(self, desired_voltage, desired_current):
@@ -319,6 +320,7 @@ class transferFinder:
         
         except Exception as e:
             print(f"Error while handling left branch: {e}. Executing escape routine.")
+            print(f"Error in line {e.__traceback__.tb_lineno}")
             self.escape_routine()
 
 
@@ -340,6 +342,10 @@ class transferFinder:
 
         # compute voltage increment
         num_steps = int(np.ceil(diff_voltage / (self.slew_rate * total_time)))       
+        if num_steps == 0:
+            self.nanonis_module.Bias.Set(new_voltage)
+            return 0
+        
         step_voltage = diff_voltage / num_steps
         time_per_step = total_time / num_steps
         additional_waiting_time = time_per_step - self.communication_time
@@ -357,6 +363,7 @@ class transferFinder:
         
         except Exception as e:
             print(f"Error while ramping bias: {e}. Executing escape routine.")
+            print(f"Error in line {e.__traceback__.tb_lineno}")
             self.escape_routine()
 
     # helper function to achieve a desired current while controler is off
